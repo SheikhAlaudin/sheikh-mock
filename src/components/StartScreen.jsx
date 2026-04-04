@@ -12,7 +12,7 @@ const AI_TOPICS = [
   { value: 'system design for a senior frontend engineer', label: 'Frontend System Design' },
 ];
 
-export default function StartScreen({ sessions, onStart, onGenerateAI }) {
+export default function StartScreen({ sessions, onStart, onGenerateAI, onUpload }) {
   const [showAIPanel, setShowAIPanel] = useState(false);
   const [topic, setTopic] = useState('');
   const [count] = useState(3);
@@ -88,6 +88,21 @@ export default function StartScreen({ sessions, onStart, onGenerateAI }) {
             </button>
           </div>
         )}
+
+        {/* Upload from file tile */}
+        <button
+          className="session-tile upload-tile"
+          style={{ '--accent': '#34d399', animationDelay: `${(sessions.length + 1) * 0.08}s` }}
+          onClick={onUpload}
+        >
+          <div className="tile-glow" style={{ background: 'radial-gradient(ellipse at 20% 50%, rgba(52,211,153,0.12), transparent 70%)' }} />
+          <div className="tile-content">
+            <div className="tile-dot" style={{ background: '#34d399' }} />
+            <div className="tile-name">📄 From File</div>
+            <div className="tile-sub">Upload CV or code · get 1 tailored question</div>
+          </div>
+          <svg className="tile-arrow" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="9 18 15 12 9 6" /></svg>
+        </button>
       </div>
     </div>
   );

@@ -396,6 +396,163 @@ async def _call_llm_for_questions(
     return result
 
 
+def _extract_pdf_text(file_bytes: bytes) -> str:
+    """Extract plain text from a PDF file."""
+    import io
+    from pypdf import PdfReader
+    reader = PdfReader(io.BytesIO(file_bytes))
+    parts = []
+    for page in reader.pages:
+        t = page.extract_text()
+        if t:
+            parts.append(t.strip())
+    return "\n\n".join(parts)[:6000]  # cap to avoid token blowout
+
+
+def _image_to_base64(file_bytes: bytes, content_type: str) -> str:
+    import base64
+    return base64.b64encode(file_bytes).decode()
+
+
+def _build_file_question_prompt(text_content: str) -> str:
+    return f"""You are a senior JavaScript/React technical interviewer.
+
+The candidate has uploaded the following content (CV, resume, code snippet, or document):
+
+---
+{text_content}
+---
+
+Based ONLY on the content above, generate exactly ONE challenging technical interview question that:
+- Is directly relevant to the technologies, projects, or skills mentioned
+- Requires the candidate to explain, justify, or demonstrate understanding
+- Is specific (not generic) — reference something actually in the content
+- Is suitable for a senior engineer (8+ years experience)
+
+STRICT RULES:
+- Return ONLY a valid JSON object — no markdown, no backticks, no explanation outside JSON.
+- Format: {{"id": "file01", "q": "<the full question>", "s": "<short category e.g. React, System Design, JS Core>", "day": 0}}
+
+Return ONLY the JSON object."""
+
+
+async def generate_question_from_file(
+    client: httpx.AsyncClient,
+    provider: str,
+    api_key: str,
+    model: str,
+    file_bytes: bytes,
+    content_type: str,
+    filename: str,
+) -> dict:
+    """Extract content from PDF or image, generate 1 interview question."""
+    import sys, base64
+
+    # Apply key fallbacks
+    if provider == "gemini":
+        api_key = api_key or GEMINI_API_KEY
+    elif provider == "groq":
+        api_key = api_key or GROQ_API_KEY
+
+    is_pdf = "pdf" in content_type or filename.lower().endswith(".pdf")
+    is_image = content_type.startswith("image/") or filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
+
+    if is_pdf:
+        text_content = _extract_pdf_text(file_bytes)
+        if not text_content.strip():
+            raise ValueError("Could not extract text from PDF")
+        prompt = _build_file_question_prompt(text_content)
+        # Text-only path for all providers
+        result = await _call_llm_for_questions(client, provider, api_key, model, prompt)
+    elif is_image:
+        # Vision path: use provider's vision capability
+        img_b64 = _image_to_base64(file_bytes, content_type)
+        mime = content_type if content_type.startswith("image/") else "image/jpeg"
+
+        vision_prompt = (
+            "You are a senior JavaScript/React technical interviewer. "
+            "Look at this image (it could be a CV, code, architecture diagram, or resume). "
+            "Based ONLY on what you see, generate exactly ONE challenging technical interview question "
+            "that is directly relevant to the content. The question should be specific and suitable for "
+            "a senior engineer (8+ years experience). "
+            "Return ONLY a raw JSON object — no markdown, no backticks: "
+            '{"id": "file01", "q": "<full question>", "s": "<category>", "day": 0}'
+        )
+
+        text = ""
+        if provider == "gemini":
+            model_name = model or "gemini-2.5-flash"
+            r = await client.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
+                params={"key": api_key},
+                json={
+                    "contents": [{"parts": [
+                        {"text": vision_prompt},
+                        {"inline_data": {"mime_type": mime, "data": img_b64}},
+                    ]}],
+                    "generationConfig": {"temperature": 0.7, "maxOutputTokens": 512},
+                },
+            )
+            r.raise_for_status()
+            data = r.json()
+            parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+            text = "".join(p.get("text", "") for p in parts if p.get("text"))
+
+        elif provider == "openai":
+            r = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": model or "gpt-4o-mini",
+                    "max_tokens": 512,
+                    "messages": [{"role": "user", "content": [
+                        {"type": "text", "text": vision_prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}},
+                    ]}],
+                },
+            )
+            r.raise_for_status()
+            text = r.json()["choices"][0]["message"]["content"]
+
+        elif provider == "anthropic":
+            r = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
+                json={
+                    "model": model or "claude-sonnet-4-20250514",
+                    "max_tokens": 512,
+                    "messages": [{"role": "user", "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": mime, "data": img_b64}},
+                        {"type": "text", "text": vision_prompt},
+                    ]}],
+                },
+            )
+            r.raise_for_status()
+            data = r.json()
+            text = "".join(c["text"] for c in data["content"] if c["type"] == "text")
+
+        else:
+            # Groq / Ollama don't support vision natively — extract via OCR hint fallback
+            raise ValueError(f"Provider '{provider}' does not support image vision. Use Gemini, OpenAI, or Anthropic for images, or upload a PDF.")
+
+        print(f"[file-vision] raw (200): {repr(text[:200])}", file=sys.stderr)
+        # Parse single JSON object
+        cleaned = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE)
+        cleaned = re.sub(r"```", "", cleaned).strip()
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start == -1 or end <= start:
+            raise ValueError(f"No JSON object in vision response: {repr(text[:150])}")
+        q = json.loads(cleaned[start:end + 1])
+        result = [{"id": q.get("id", "file01"), "q": str(q["q"]).strip(), "s": str(q.get("s", "AI Generated")).strip(), "day": 0}]
+    else:
+        raise ValueError("Unsupported file type. Please upload a PDF or image (PNG, JPG, WEBP).")
+
+    if not result:
+        raise ValueError("Could not generate a question from this file")
+    return result[0]
+
+
 async def generate_questions_with_provider(
     client: httpx.AsyncClient,
     provider: str,

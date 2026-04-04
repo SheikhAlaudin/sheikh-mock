@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
-import { fetchQuestions, fetchProviders, evaluateAnswer, generateQuestions } from './api';
+import { fetchQuestions, fetchProviders, evaluateAnswer, generateQuestions, generateFromFile } from './api';
 import { useSettings } from './hooks/useSettings';
 import Particles from './components/Particles';
 import StatusBar from './components/StatusBar';
@@ -7,6 +7,7 @@ import SettingsDrawer from './components/SettingsDrawer';
 import StartScreen from './components/StartScreen';
 import SessionScreen from './components/SessionScreen';
 import DoneScreen from './components/DoneScreen';
+import UploadPage from './components/UploadPage';
 
 function getStats(history) {
   const ans = history.filter(h => h.verdict !== 'skipped');
@@ -77,6 +78,35 @@ export default function App() {
   }, []);
 
   const goStart = useCallback(() => setS(prev => ({ ...prev, phase: 'start' })), []);
+
+  const goUpload = useCallback(() => setS(prev => ({ ...prev, phase: 'upload' })), []);
+
+  const startFileSession = useCallback(async (file) => {
+    setS(prev => ({ ...prev, loading: true }));
+    try {
+      const data = await generateFromFile(
+        file,
+        settings.provider,
+        settings.apiKey,
+        settings.model,
+      );
+      setS(prev => ({
+        ...prev,
+        loading: false,
+        phase: 'question',
+        session: data.questions,
+        idx: 0,
+        history: [],
+        attempts: 0,
+        submittedAnswer: '',
+        result: null,
+        showIdeal: false,
+      }));
+    } catch (e) {
+      setS(prev => ({ ...prev, loading: false }));
+      throw e;
+    }
+  }, [settings]);
 
   const startAISession = useCallback(async (topic, count) => {
     setS(prev => ({ ...prev, loading: true }));
@@ -197,7 +227,10 @@ export default function App() {
 
         {/* Screens */}
         {!s.loading && s.phase === 'start' && (
-          <StartScreen sessions={s.sessions} onStart={startSession} onGenerateAI={startAISession} />
+          <StartScreen sessions={s.sessions} onStart={startSession} onGenerateAI={startAISession} onUpload={goUpload} />
+        )}
+        {!s.loading && s.phase === 'upload' && (
+          <UploadPage onGenerateFromFile={startFileSession} onBack={goStart} />
         )}
         {!s.loading && s.phase === 'done' && (
           <DoneScreen

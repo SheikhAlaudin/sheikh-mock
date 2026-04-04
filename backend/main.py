@@ -244,6 +244,41 @@ async def transcribe(
         raise HTTPException(status_code=502, detail=f"Transcription failed: {str(e)}")
 
 
+@app.post("/api/generate-from-file")
+async def generate_from_file(
+    file: UploadFile = File(...),
+    provider: str = Form("groq"),
+    api_key: str = Form(""),
+    model: str = Form(""),
+):
+    """Extract text/content from a PDF or image and generate 1 interview question."""
+    from providers import generate_question_from_file
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    content_type = file.content_type or ""
+    filename = file.filename or ""
+
+    try:
+        question = await generate_question_from_file(
+            client=http_client,
+            provider=provider,
+            api_key=api_key,
+            model=model,
+            file_bytes=file_bytes,
+            content_type=content_type,
+            filename=filename,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"File question generation failed: {str(e)}")
+
+    return {"questions": [question]}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

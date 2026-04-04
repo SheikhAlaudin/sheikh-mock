@@ -67,6 +67,25 @@ export async function transcribeAudio(audioBlob, groqApiKey) {
   return data.text || '';
 }
 
+export async function generateFromFile(file, provider, apiKey, model) {
+  const form = new FormData();
+  form.append('file', file);
+  form.append('provider', provider || 'groq');
+  form.append('api_key', apiKey || '');
+  form.append('model', model || '');
+
+  const res = await fetch(`${BASE}/api/generate-from-file`, {
+    method: 'POST',
+    body: form,
+  });
+  if (!res.ok) {
+    let detail;
+    try { const d = await res.json(); detail = d.detail; } catch { detail = await res.text(); }
+    throw new Error(detail || `File question generation failed (${res.status})`);
+  }
+  return res.json(); // { questions: [{ id, q, s, day }] }
+}
+
 export async function healthCheck() {
   try {
     const res = await fetch(`${BASE}/api/health`);
