@@ -53,6 +53,14 @@ class EvalRequest(BaseModel):
     model: str = ""                 # optional override
 
 
+class GenerateQuestionsRequest(BaseModel):
+    provider: str = "groq"
+    api_key: str = ""
+    model: str = ""
+    topic: str = ""        # optional focus e.g. "React hooks"
+    count: int = 3
+
+
 class EvalResult(BaseModel):
     score: int
     verdict: str
@@ -175,6 +183,31 @@ async def evaluate(req: EvalRequest):
         raise HTTPException(status_code=422, detail="LLM returned unparseable response")
 
     return result
+
+
+@app.post("/api/generate-questions")
+async def generate_questions(req: GenerateQuestionsRequest):
+    """Generate fresh interview questions using the selected LLM provider."""
+    from providers import generate_questions_with_provider
+    count = max(1, min(10, req.count))
+    try:
+        questions = await generate_questions_with_provider(
+            client=http_client,
+            provider=req.provider,
+            api_key=req.api_key,
+            model=req.model,
+            topic=req.topic,
+            count=count,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Generation failed: {str(e)}")
+
+    if not questions:
+        raise HTTPException(status_code=422, detail="LLM returned no valid questions")
+
+    return {"questions": questions}
 
 
 @app.post("/api/transcribe")

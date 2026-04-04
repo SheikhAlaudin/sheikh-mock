@@ -280,3 +280,136 @@ async def evaluate_with_provider(
         return await call_anthropic(client, api_key, model, section, question, answer)
     else:
         raise ValueError(f"Unknown provider: {provider}")
+
+
+# ─── Question generation ──────────────────────────────────
+
+def build_question_gen_prompt(topic: str, count: int) -> str:
+    focus = f"Focus specifically on: {topic}." if topic else \
+        "Cover a mix of: JS Core concepts, async/promises, React hooks, performance, and system design."
+    return f"""You are a senior JavaScript/React technical interviewer with 15 years experience.
+
+Generate exactly {count} technical interview questions for a candidate with 8+ years of experience.
+
+{focus}
+
+STRICT RULES:
+- Return ONLY a valid JSON array — no markdown, no backticks, no explanation.
+- Each item must have exactly these fields: {{"id": string, "q": string, "s": string, "day": 0}}
+  - "id": unique short id like "gen01", "gen02", etc.
+  - "q": the full interview question (be specific, scenario-based, not generic)
+  - "s": category label e.g. "React Hooks", "JS Core", "Performance", "System Design"
+  - "day": always 0 (indicates AI-generated)
+- Mix difficulty: at least one deep conceptual, one practical/code, one scenario-based.
+- Questions must require explanation, not yes/no answers.
+
+Return ONLY the JSON array, nothing else."""
+
+
+async def _call_llm_for_questions(
+    client: httpx.AsyncClient,
+    provider: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+) -> list:
+    """Call the appropriate LLM and return parsed question list."""
+    import sys
+
+    text = ""
+    if provider == "ollama":
+        r = await client.post(
+            "http://localhost:11434/api/generate",
+            json={"model": model or "llama3:latest", "prompt": prompt, "stream": False,
+                  "options": {"temperature": 0.7, "num_predict": 1024}},
+        )
+        r.raise_for_status()
+        text = r.json().get("response", "")
+
+    elif provider == "gemini":
+        model_name = model or "gemini-2.5-flash"
+        r = await client.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
+            params={"key": api_key},
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2048,
+                                     "responseMimeType": "application/json"},
+            },
+        )
+        r.raise_for_status()
+        data = r.json()
+        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        text = "".join(p.get("text", "") for p in parts if p.get("text"))
+
+    elif provider in ("groq", "openai", "anthropic"):
+        if provider == "groq":
+            url = "https://api.groq.com/openai/v1/chat/completions"
+            headers = {"Authorization": f"Bearer {api_key}"}
+            mdl = model or "llama-3.3-70b-versatile"
+        elif provider == "openai":
+            url = "https://api.openai.com/v1/chat/completions"
+            headers = {"Authorization": f"Bearer {api_key}"}
+            mdl = model or "gpt-4o-mini"
+        else:  # anthropic — use openai-compat via messages
+            r2 = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": api_key, "anthropic-version": "2023-06-01",
+                         "Content-Type": "application/json"},
+                json={"model": model or "claude-sonnet-4-20250514", "max_tokens": 1024,
+                      "messages": [{"role": "user", "content": prompt}]},
+            )
+            r2.raise_for_status()
+            data2 = r2.json()
+            text = "".join(c["text"] for c in data2["content"] if c["type"] == "text")
+            mdl = None
+
+        if provider in ("groq", "openai"):
+            r = await client.post(url, headers=headers,
+                json={"model": mdl, "temperature": 0.7, "max_tokens": 1024,
+                      "messages": [{"role": "user", "content": prompt}]})
+            r.raise_for_status()
+            text = r.json()["choices"][0]["message"]["content"]
+
+    print(f"[gen] raw (200): {repr(text[:200])}", file=sys.stderr)
+
+    # Parse JSON array from text
+    cleaned = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"```", "", cleaned).strip()
+    start = cleaned.find("[")
+    end = cleaned.rfind("]")
+    if start == -1 or end <= start:
+        raise ValueError(f"No JSON array in response: {repr(text[:150])}")
+
+    questions = json.loads(cleaned[start:end + 1])
+    # Validate and normalise each question
+    result = []
+    for i, q in enumerate(questions):
+        if not isinstance(q, dict) or "q" not in q:
+            continue
+        result.append({
+            "id": q.get("id") or f"gen{i+1:02d}",
+            "q": str(q["q"]).strip(),
+            "s": str(q.get("s") or q.get("category") or "AI Generated").strip(),
+            "day": 0,
+        })
+    return result
+
+
+async def generate_questions_with_provider(
+    client: httpx.AsyncClient,
+    provider: str,
+    api_key: str,
+    model: str,
+    topic: str,
+    count: int,
+) -> list:
+    """Generate interview questions using the selected provider."""
+    # Apply key fallbacks
+    if provider == "gemini":
+        api_key = api_key or GEMINI_API_KEY
+    elif provider in ("groq",):
+        api_key = api_key or GROQ_API_KEY
+
+    prompt = build_question_gen_prompt(topic, count)
+    return await _call_llm_for_questions(client, provider, api_key, model, prompt)

@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
-import { fetchQuestions, fetchProviders, evaluateAnswer, healthCheck } from './api';
+import { fetchQuestions, fetchProviders, evaluateAnswer, generateQuestions } from './api';
 import { useSettings } from './hooks/useSettings';
 import Particles from './components/Particles';
 import StatusBar from './components/StatusBar';
@@ -77,6 +77,34 @@ export default function App() {
   }, []);
 
   const goStart = useCallback(() => setS(prev => ({ ...prev, phase: 'start' })), []);
+
+  const startAISession = useCallback(async (topic, count) => {
+    setS(prev => ({ ...prev, loading: true }));
+    try {
+      const data = await generateQuestions(
+        settings.provider,
+        settings.apiKey,
+        settings.model,
+        topic,
+        count,
+      );
+      setS(prev => ({
+        ...prev,
+        loading: false,
+        phase: 'question',
+        session: data.questions,
+        idx: 0,
+        history: [],
+        attempts: 0,
+        submittedAnswer: '',
+        result: null,
+        showIdeal: false,
+      }));
+    } catch (e) {
+      alert('Failed to generate questions: ' + e.message);
+      setS(prev => ({ ...prev, loading: false }));
+    }
+  }, [settings]);
   const openSettings = useCallback(() => setS(prev => ({ ...prev, settingsOpen: true })), []);
   const closeSettings = useCallback(() => setS(prev => ({ ...prev, settingsOpen: false })), []);
 
@@ -169,7 +197,7 @@ export default function App() {
 
         {/* Screens */}
         {!s.loading && s.phase === 'start' && (
-          <StartScreen sessions={s.sessions} onStart={startSession} />
+          <StartScreen sessions={s.sessions} onStart={startSession} onGenerateAI={startAISession} />
         )}
         {!s.loading && s.phase === 'done' && (
           <DoneScreen
