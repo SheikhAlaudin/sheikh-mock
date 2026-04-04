@@ -150,25 +150,48 @@ export default function SessionScreen({
           </div>
 
           <div className={`result-panel ${result.verdict}`}>
+            {/* Score + verdict header */}
             <div className="result-top">
               <ScoreReveal score={result.score} verdict={result.verdict} />
               <div className="result-verdict-info">
                 <span className="verdict-text">
                   {result.verdict === 'correct' ? 'Correct' : result.verdict === 'partial' ? 'Partially Correct' : 'Incorrect'}
                 </span>
-                {result.strength && result.strength !== 'Nothing significant' && (
-                  <div className="feedback-row">
-                    <span className="fb-label">Strength</span>
-                    <p className="fb-value">{result.strength}</p>
-                  </div>
-                )}
-                {result.missing && result.missing !== 'None' && (
-                  <div className="feedback-row">
-                    <span className="fb-label">Missing</span>
-                    <p className="fb-value">{result.missing}</p>
-                  </div>
-                )}
+                <span className="semantic-note">Semantically evaluated</span>
               </div>
+            </div>
+
+            {/* Score bar */}
+            <div className="score-bar-wrap">
+              <div className="score-bar">
+                <div
+                  className={`score-bar-fill ${result.verdict}`}
+                  style={{ width: `${result.score}%` }}
+                />
+              </div>
+              <span className="score-bar-label">{result.score}/100</span>
+            </div>
+
+            {/* Concept feedback */}
+            <div className="concept-grid">
+              {result.strength && result.strength !== 'Nothing significant' && (
+                <div className="concept-card covered">
+                  <span className="concept-icon">✓</span>
+                  <div>
+                    <span className="concept-label">What you covered</span>
+                    <p className="concept-text">{result.strength}</p>
+                  </div>
+                </div>
+              )}
+              {result.missing && result.missing !== 'None' && (
+                <div className="concept-card missing">
+                  <span className="concept-icon">✗</span>
+                  <div>
+                    <span className="concept-label">What was missing</span>
+                    <p className="concept-text">{result.missing}</p>
+                  </div>
+                </div>
+              )}
             </div>
 
             {result.hint && (

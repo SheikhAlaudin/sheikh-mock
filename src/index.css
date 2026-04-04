@@ -567,12 +567,90 @@ html, body {
 .verdict-text {
   font-size: 18px;
   font-weight: 600;
-  margin-bottom: 12px;
+  margin-bottom: 4px;
   display: block;
 }
 .correct .verdict-text { color: var(--green); }
 .partial .verdict-text { color: var(--yellow); }
 .incorrect .verdict-text { color: var(--red); }
+
+.semantic-note {
+  font-size: 10px;
+  color: var(--text-3);
+  font-style: italic;
+  display: block;
+  margin-bottom: 8px;
+}
+
+/* Score bar */
+.score-bar-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.score-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--bg-3);
+  border-radius: 100px;
+  overflow: hidden;
+}
+.score-bar-fill {
+  height: 100%;
+  border-radius: 100px;
+  transition: width 0.8s ease;
+}
+.score-bar-fill.correct { background: linear-gradient(90deg, var(--green), #00e5ff); }
+.score-bar-fill.partial { background: linear-gradient(90deg, var(--yellow), #ffaa00); }
+.score-bar-fill.incorrect { background: linear-gradient(90deg, var(--red), #ff4444); }
+.score-bar-label { font-size: 12px; color: var(--text-3); white-space: nowrap; }
+
+/* Concept cards */
+.concept-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.concept-card {
+  display: flex;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  align-items: flex-start;
+}
+.concept-card.covered {
+  background: rgba(100, 255, 218, 0.06);
+  border: 1px solid rgba(100, 255, 218, 0.15);
+}
+.concept-card.missing {
+  background: rgba(255, 107, 107, 0.06);
+  border: 1px solid rgba(255, 107, 107, 0.15);
+}
+.concept-icon {
+  font-size: 13px;
+  font-weight: 700;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.concept-card.covered .concept-icon { color: var(--green); }
+.concept-card.missing .concept-icon { color: var(--red); }
+.concept-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+  display: block;
+  margin-bottom: 3px;
+}
+.concept-text {
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.6;
+  margin: 0;
+}
 
 .feedback-row { margin-bottom: 10px; }
 .fb-label {
