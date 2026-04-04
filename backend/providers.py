@@ -5,7 +5,12 @@ Supports: Ollama (local), Google Gemini, OpenAI, Anthropic.
 
 import json
 import re
+import os
 import httpx
+
+# ── Hardcoded fallback keys (used when no key is passed from frontend) ──
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
+GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "YOUR_GROQ_API_KEY_HERE")
 
 EVAL_SYSTEM = (
     "You are a senior JavaScript/React technical interviewer evaluating a candidate with 8+ years of experience. "
@@ -116,6 +121,7 @@ async def call_gemini(
     question: str,
     answer: str,
 ) -> dict:
+    api_key = api_key or GEMINI_API_KEY
     prompt = build_eval_prompt(section, question, answer)
     model_name = model or "gemini-2.5-flash"
     r = await client.post(
@@ -185,6 +191,7 @@ async def call_groq(
     question: str,
     answer: str,
 ) -> dict:
+    api_key = api_key or GROQ_API_KEY
     prompt = build_eval_prompt(section, question, answer)
     r = await client.post(
         "https://api.groq.com/openai/v1/chat/completions",
