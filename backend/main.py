@@ -8,7 +8,7 @@ Run:  uvicorn main:app --reload --port 8000
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -175,6 +175,40 @@ async def evaluate(req: EvalRequest):
         raise HTTPException(status_code=422, detail="LLM returned unparseable response")
 
     return result
+
+
+@app.post("/api/transcribe")
+async def transcribe(
+    audio: UploadFile = File(...),
+    groq_api_key: str = Form(...),
+):
+    """Transcribe audio using Groq Whisper large-v3-turbo."""
+    if not groq_api_key:
+        raise HTTPException(status_code=400, detail="Groq API key is required for transcription")
+
+    audio_bytes = await audio.read()
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio file")
+
+    try:
+        r = await http_client.post(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {groq_api_key}"},
+            files={"file": (audio.filename or "audio.webm", audio_bytes, audio.content_type or "audio/webm")},
+            data={
+                "model": "whisper-large-v3-turbo",
+                "response_format": "json",
+                "language": "en",
+            },
+        )
+        r.raise_for_status()
+        data = r.json()
+        return {"text": data.get("text", "").strip()}
+    except httpx.HTTPStatusError as e:
+        detail = f"Groq Whisper error: {e.response.text[:200]}"
+        raise HTTPException(status_code=502, detail=detail)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Transcription failed: {str(e)}")
 
 
 if __name__ == "__main__":

@@ -87,12 +87,14 @@ async def call_gemini(
         params={"key": api_key},
         json={
             "contents": [{"parts": [{"text": f"{EVAL_SYSTEM}\n\n{prompt}"}]}],
-            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 512},
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1024},
         },
     )
     r.raise_for_status()
     data = r.json()
-    text = data["candidates"][0]["content"]["parts"][0]["text"]
+    # gemini-2.5-flash may include thinking parts — collect only text parts
+    parts = data["candidates"][0]["content"]["parts"]
+    text = "".join(p.get("text", "") for p in parts if p.get("text"))
     return parse_eval_json(text)
 
 

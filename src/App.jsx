@@ -185,6 +185,7 @@ export default function App() {
             showIdeal={s.showIdeal} attempts={s.attempts} stats={stats}
             onSubmit={submitAnswer} onNext={nextQ} onSkip={skipQ}
             onRetry={retryQ} onToggleIdeal={toggleIdeal} onGoStart={goStart}
+            groqApiKey={settings.provider === 'groq' ? settings.apiKey : (import.meta.env.VITE_GROQ_API_KEY || '')}
           />
         )}
       </div>

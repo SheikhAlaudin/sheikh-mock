@@ -1,29 +1,51 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
+import { transcribeAudio } from '../api';
+
+/**
+ * useVoice — Groq Whisper STT (primary) with Web Speech API fallback.
+ *
+ * When groqApiKey is provided:
+ *   - Click Start → MediaRecorder begins capturing mic audio
+ *   - Click Stop  → audio blob sent to /api/transcribe → Whisper returns text
+ *   - Text appended to textarea via onTranscript()
+ *
+ * When no groqApiKey:
+ *   - Falls back to browser Web Speech API (real-time, lower quality)
+ */
 
 const SR = typeof window !== 'undefined'
   ? (window.SpeechRecognition || window.webkitSpeechRecognition)
   : null;
 
-export function useVoice(onTranscript) {
+export function useVoice(onTranscript, groqApiKey = '') {
   const [isRecording, setIsRecording] = useState(false);
-  const [hasMic, setHasMic] = useState(!!SR);
-  const [label, setLabel] = useState(
-    SR ? 'Voice fills the box below — or just type' : 'Type your answer below'
-  );
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [hasMic, setHasMic] = useState(true);
+  const [label, setLabel] = useState('Click Voice to speak your answer');
+  const [error, setError] = useState('');
 
-  // Stable refs — never trigger re-renders or stale closures
-  const isRecRef = useRef(false);
-  const recogRef = useRef(null);
   const onTranscriptRef = useRef(onTranscript);
-  const hasMicRef = useRef(!!SR);
+  const groqKeyRef = useRef(groqApiKey);
+  const isRecRef = useRef(false);
 
-  // Keep transcript callback ref up to date without recreating recognition
+  // Keep refs current
   useEffect(() => { onTranscriptRef.current = onTranscript; }, [onTranscript]);
+  useEffect(() => { groqKeyRef.current = groqApiKey; }, [groqApiKey]);
 
-  // Build recognition instance once
+  // ── MediaRecorder refs (Groq Whisper mode) ──
+  const mediaRecorderRef = useRef(null);
+  const chunksRef = useRef([]);
+  const streamRef = useRef(null);
+
+  // ── Web Speech API ref (fallback mode) ──
+  const recogRef = useRef(null);
+  const hasMicRef = useRef(true);
+
+  const useWhisper = () => !!groqKeyRef.current;
+
+  // Build Web Speech instance once (fallback only)
   useEffect(() => {
     if (!SR || recogRef.current) return;
-
     const r = new SR();
     r.continuous = true;
     r.interimResults = true;
@@ -42,7 +64,6 @@ export function useVoice(onTranscript) {
     };
 
     r.onerror = (e) => {
-      // Fatal — mic permanently unavailable
       if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
         hasMicRef.current = false;
         setHasMic(false);
@@ -51,29 +72,21 @@ export function useVoice(onTranscript) {
         setLabel('Mic access denied. Type your answer below.');
         return;
       }
-      // Recoverable — Chrome fires these during normal use; onend will restart
-      // 'no-speech': silence timeout (~5s)
-      // 'network': brief connectivity hiccup
-      // 'aborted': we called stop() intentionally
       if (e.error === 'no-speech' || e.error === 'network' || e.error === 'aborted') return;
-      // Any other unexpected error — stop cleanly
       isRecRef.current = false;
       setIsRecording(false);
-      setLabel('Voice fills the box below — or just type');
+      setLabel('Click Voice to speak your answer');
     };
 
     r.onend = () => {
-      // Auto-restart only if we're still supposed to be recording
       if (isRecRef.current && hasMicRef.current) {
-        try {
-          r.start();
-        } catch {
+        try { r.start(); } catch {
           setTimeout(() => {
             if (isRecRef.current && hasMicRef.current) {
               try { r.start(); } catch {
                 isRecRef.current = false;
                 setIsRecording(false);
-                setLabel('Voice fills the box below — or just type');
+                setLabel('Click Voice to speak your answer');
               }
             }
           }, 200);
@@ -81,51 +94,126 @@ export function useVoice(onTranscript) {
       } else {
         isRecRef.current = false;
         setIsRecording(false);
-        setLabel('Voice fills the box below — or just type');
+        setLabel('Click Voice to speak your answer');
       }
     };
 
     recogRef.current = r;
-  }, []); // run once only
+  }, []);
 
-  const toggle = useCallback(() => {
-    if (!hasMicRef.current || !recogRef.current) return;
+  // ── Start recording ──
+  const startWhisper = useCallback(async () => {
+    setError('');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      chunksRef.current = [];
 
-    if (isRecRef.current) {
-      // Stop
-      isRecRef.current = false;
-      try { recogRef.current.stop(); } catch { /* ignore */ }
-      setIsRecording(false);
-      setLabel('Voice fills the box below — or just type');
-    } else {
-      // Start
+      // Pick best supported format
+      const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg'].find(
+        t => MediaRecorder.isTypeSupported(t)
+      ) || '';
+
+      const mr = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+      mr.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+      mr.start(250); // collect chunks every 250ms
+      mediaRecorderRef.current = mr;
+
       isRecRef.current = true;
-      try {
-        recogRef.current.start();
+      setIsRecording(true);
+      setLabel('Recording... click Stop when done');
+    } catch {
+      setHasMic(false);
+      setLabel('Mic access denied. Type your answer below.');
+    }
+  }, []);
+
+  const stopWhisper = useCallback(async () => {
+    const mr = mediaRecorderRef.current;
+    const stream = streamRef.current;
+    if (!mr) return;
+
+    isRecRef.current = false;
+    setIsRecording(false);
+    setLabel('Transcribing with Whisper...');
+    setIsTranscribing(true);
+
+    await new Promise((resolve) => {
+      mr.onstop = resolve;
+      mr.stop();
+    });
+
+    // Stop mic tracks
+    stream?.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
+    mediaRecorderRef.current = null;
+
+    try {
+      const blob = new Blob(chunksRef.current, { type: mr.mimeType || 'audio/webm' });
+      chunksRef.current = [];
+
+      if (blob.size < 1000) {
+        setLabel('Recording too short — try again');
+        setIsTranscribing(false);
+        return;
+      }
+
+      const text = await transcribeAudio(blob, groqKeyRef.current);
+      if (text) {
+        onTranscriptRef.current(text);
+        setLabel(`Transcribed ${text.split(' ').length} words`);
+        setTimeout(() => setLabel('Click Voice to speak your answer'), 3000);
+      } else {
+        setLabel('No speech detected — try again');
+        setTimeout(() => setLabel('Click Voice to speak your answer'), 3000);
+      }
+    } catch (e) {
+      setError('Transcription failed: ' + e.message);
+      setLabel('Click Voice to speak your answer');
+    } finally {
+      setIsTranscribing(false);
+    }
+  }, []);
+
+  // ── Fallback Web Speech start/stop ──
+  const startSpeech = useCallback(() => {
+    if (!hasMicRef.current || !recogRef.current) return;
+    isRecRef.current = true;
+    try {
+      recogRef.current.start();
+      setIsRecording(true);
+      setLabel('Listening — speak now...');
+    } catch (e) {
+      if (e.name === 'InvalidStateError') {
         setIsRecording(true);
         setLabel('Listening — speak now...');
-      } catch (e) {
-        if (e.name === 'InvalidStateError') {
-          // Already running — treat as success
-          setIsRecording(true);
-          setLabel('Listening — speak now...');
-        } else {
-          hasMicRef.current = false;
-          setHasMic(false);
-          isRecRef.current = false;
-          setIsRecording(false);
-        }
       }
     }
   }, []);
 
-  const stop = useCallback(() => {
-    if (!isRecRef.current) return;
+  const stopSpeech = useCallback(() => {
     isRecRef.current = false;
     try { recogRef.current?.stop(); } catch { /* ignore */ }
     setIsRecording(false);
-    setLabel('Voice fills the box below — or just type');
+    setLabel('Click Voice to speak your answer');
   }, []);
 
-  return { isRecording, hasMic, label, toggle, stop };
+  // ── Public API ──
+  const toggle = useCallback(() => {
+    if (!hasMic) return;
+    if (isRecording) {
+      useWhisper() ? stopWhisper() : stopSpeech();
+    } else {
+      useWhisper() ? startWhisper() : startSpeech();
+    }
+  }, [hasMic, isRecording, startWhisper, stopWhisper, startSpeech, stopSpeech]);
+
+  const stop = useCallback(() => {
+    if (!isRecRef.current && !isRecording) return;
+    useWhisper() ? stopWhisper() : stopSpeech();
+  }, [isRecording, stopWhisper, stopSpeech]);
+
+  const mode = useWhisper() ? 'whisper' : SR ? 'browser' : 'none';
+
+  return { isRecording, isTranscribing, hasMic, label, error, mode, toggle, stop };
 }

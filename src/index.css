@@ -338,9 +338,33 @@ html, body {
 .voice-controls {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+  min-height: 32px;
 }
 .waveform { flex-shrink: 0; }
+.voice-label {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.voice-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.voice-mode-badge {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 100px;
+  background: rgba(100, 255, 218, 0.1);
+  color: var(--accent);
+  font-weight: 500;
+  white-space: nowrap;
+}
 .voice-toggle {
   padding: 6px 16px;
   border-radius: var(--radius-xs);
@@ -360,6 +384,14 @@ html, body {
   color: white;
   animation: pulse-soft 1.5s infinite;
 }
+.voice-toggle.transcribing {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+  cursor: not-allowed;
+  animation: none;
+}
+.voice-toggle:disabled { opacity: 0.7; cursor: not-allowed; }
 @keyframes pulse-soft {
   0%, 100% { box-shadow: 0 0 0 0 rgba(255, 107, 107, 0.4); }
   50% { box-shadow: 0 0 0 6px rgba(255, 107, 107, 0); }

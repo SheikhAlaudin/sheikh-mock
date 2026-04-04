@@ -7,7 +7,7 @@ import WaveformVisualizer from './WaveformVisualizer';
 
 export default function SessionScreen({
   session, idx, phase, submittedAnswer, result, showIdeal, attempts, stats,
-  onSubmit, onNext, onSkip, onRetry, onToggleIdeal, onGoStart,
+  onSubmit, onNext, onSkip, onRetry, onToggleIdeal, onGoStart, groqApiKey,
 }) {
   const [error, setError] = useState('');
   const taRef = useRef(null);
@@ -20,7 +20,7 @@ export default function SessionScreen({
     ta.scrollTop = ta.scrollHeight;
   }, []);
 
-  const { isRecording, hasMic, label, toggle, stop } = useVoice(handleTranscript);
+  const { isRecording, isTranscribing, hasMic, label, error: voiceError, mode, toggle, stop } = useVoice(handleTranscript, groqApiKey);
   const { displayed: typedQuestion, done: typingDone, skip: skipTyping } = useTypewriter(
     phase === 'question' || phase === 'thinking' || phase === 'result' ? q.q : '',
     22
@@ -91,12 +91,23 @@ export default function SessionScreen({
         <div className="answer-area slide-up">
           <div className="voice-controls">
             <WaveformVisualizer active={isRecording} />
-            {hasMic && (
-              <button className={`voice-toggle${isRecording ? ' active' : ''}`} onClick={toggle}>
-                {isRecording ? '⏹ Stop' : '🎤 Voice'}
-              </button>
+            <span className="voice-label">{isTranscribing ? 'Transcribing...' : label}</span>
+            {mode !== 'none' && hasMic && (
+              <div className="voice-right">
+                <span className="voice-mode-badge">
+                  {mode === 'whisper' ? '⚡ Whisper' : '🌐 Browser'}
+                </span>
+                <button
+                  className={`voice-toggle${isRecording ? ' active' : ''}${isTranscribing ? ' transcribing' : ''}`}
+                  onClick={toggle}
+                  disabled={isTranscribing}
+                >
+                  {isTranscribing ? '...' : isRecording ? '⏹ Stop' : '🎤 Voice'}
+                </button>
+              </div>
             )}
           </div>
+          {voiceError && <div className="inline-error">{voiceError}</div>}
           <textarea
             ref={taRef}
             className="answer-input"
