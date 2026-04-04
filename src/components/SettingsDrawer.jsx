@@ -1,10 +1,22 @@
 import { useState, useEffect } from 'react';
 
+// Pre-filled keys from env (public-safe ones only — Groq is set via .env)
+const ENV_GROQ_KEY = import.meta.env.VITE_GROQ_API_KEY || '';
+
 export default function SettingsDrawer({ open, onClose, settings, onUpdate, providers }) {
   const [local, setLocal] = useState({ ...settings });
+  const [showKey, setShowKey] = useState(false);
 
   useEffect(() => {
-    if (open) setLocal({ ...settings });
+    if (open) {
+      // Auto-fill Groq key from env if user hasn't saved one yet
+      const saved = { ...settings };
+      if (!saved.apiKey && saved.provider === 'groq' && ENV_GROQ_KEY) {
+        saved.apiKey = ENV_GROQ_KEY;
+      }
+      setLocal(saved);
+      setShowKey(false);
+    }
   }, [open, settings]);
 
   const currentProvider = providers.find(p => p.id === local.provider);
@@ -12,6 +24,12 @@ export default function SettingsDrawer({ open, onClose, settings, onUpdate, prov
   const handleSave = () => {
     onUpdate(local);
     onClose();
+  };
+
+  const handleProviderSwitch = (providerId) => {
+    const autoKey = providerId === 'groq' && ENV_GROQ_KEY ? ENV_GROQ_KEY : '';
+    setLocal({ ...local, provider: providerId, model: '', apiKey: autoKey });
+    setShowKey(false);
   };
 
   if (!open) return null;
@@ -34,10 +52,11 @@ export default function SettingsDrawer({ open, onClose, settings, onUpdate, prov
               <button
                 key={p.id}
                 className={`provider-card${local.provider === p.id ? ' active' : ''}`}
-                onClick={() => setLocal({ ...local, provider: p.id, model: '', apiKey: local.provider === p.id ? local.apiKey : '' })}
+                onClick={() => handleProviderSwitch(p.id)}
               >
                 <span className="provider-icon">{providerIcon(p.id)}</span>
                 <span className="provider-name">{p.name}</span>
+                {p.id === 'groq' && ENV_GROQ_KEY && <span className="provider-badge groq-badge">Key ready</span>}
                 {!p.needs_key && <span className="provider-badge">Free</span>}
               </button>
             ))}
@@ -49,15 +68,31 @@ export default function SettingsDrawer({ open, onClose, settings, onUpdate, prov
               <label className="field-label">{currentProvider.name} API Key</label>
               <div className="key-input-wrap">
                 <input
-                  type="password"
+                  type={showKey ? 'text' : 'password'}
                   className="field-input"
                   placeholder={`Paste your ${currentProvider.name} API key...`}
                   value={local.apiKey}
                   onChange={e => setLocal({ ...local, apiKey: e.target.value })}
                   autoComplete="off"
                 />
+                <button
+                  type="button"
+                  className="key-toggle"
+                  onClick={() => setShowKey(v => !v)}
+                  title={showKey ? 'Hide key' : 'Show key'}
+                >
+                  {showKey ? '🙈' : '👁️'}
+                </button>
               </div>
-              <p className="field-hint">Stored locally in your browser. Never sent to our servers.</p>
+              {local.provider === 'groq' && (
+                <p className="field-hint groq-hint">
+                  Free tier — 1,000 requests/day. Get your key at{' '}
+                  <a href="https://console.groq.com" target="_blank" rel="noreferrer">console.groq.com</a>
+                </p>
+              )}
+              {local.provider !== 'groq' && (
+                <p className="field-hint">Stored locally in your browser. Never sent to our servers.</p>
+              )}
             </>
           )}
 
@@ -90,8 +125,9 @@ function providerIcon(id) {
   switch (id) {
     case 'ollama': return '🖥️';
     case 'gemini': return '💎';
+    case 'groq': return '⚡';
     case 'openai': return '🤖';
     case 'anthropic': return '🔮';
-    default: return '⚡';
+    default: return '🔧';
   }
 }

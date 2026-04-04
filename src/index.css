@@ -759,8 +759,31 @@ html, body {
   font-weight: 600;
   text-transform: uppercase;
 }
+.groq-badge {
+  background: rgba(255, 217, 61, 0.15);
+  color: var(--yellow);
+}
+.groq-hint a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.groq-hint a:hover { text-decoration: underline; }
 
-.key-input-wrap { position: relative; }
+.key-input-wrap { position: relative; display: flex; align-items: center; gap: 8px; }
+.key-input-wrap .field-input { flex: 1; padding-right: 42px; }
+.key-toggle {
+  position: absolute;
+  right: 10px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text-3);
+  padding: 4px;
+  line-height: 1;
+  transition: color .15s;
+}
+.key-toggle:hover { color: var(--text-1); }
 .field-input {
   width: 100%;
   padding: 10px 14px;

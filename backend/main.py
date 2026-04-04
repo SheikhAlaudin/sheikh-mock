@@ -23,14 +23,14 @@ http_client: httpx.AsyncClient | None = None
 async def lifespan(app: FastAPI):
     global http_client
     http_client = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0))
-    print("✓ Sheikh Mock backend ready — multi-provider mode")
+    print("[OK] Sheikh Mock backend ready - multi-provider mode")
     # Check Ollama
     try:
         r = await http_client.get("http://localhost:11434/api/tags")
         models = [m["name"] for m in r.json().get("models", [])]
-        print(f"  Ollama connected — models: {models}")
+        print(f"  Ollama connected - models: {models}")
     except httpx.ConnectError:
-        print("  Ollama not running (optional — cloud providers still work)")
+        print("  Ollama not running (optional - cloud providers still work)")
     yield
     await http_client.aclose()
 
@@ -113,6 +113,13 @@ async def get_providers():
             needs_key=True,
             default_model="gemini-2.5-flash",
             models=["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"],
+        ),
+        ProviderInfo(
+            id="groq",
+            name="Groq",
+            needs_key=True,
+            default_model="llama-3.3-70b-versatile",
+            models=["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen-qwq-32b", "gemma2-9b-it"],
         ),
         ProviderInfo(
             id="openai",

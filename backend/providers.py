@@ -124,6 +124,34 @@ async def call_openai(
     return parse_eval_json(text)
 
 
+# ─── Groq ────────────────────────────────────────────────
+async def call_groq(
+    client: httpx.AsyncClient,
+    api_key: str,
+    model: str,
+    section: str,
+    question: str,
+    answer: str,
+) -> dict:
+    prompt = build_eval_prompt(section, question, answer)
+    r = await client.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={
+            "model": model or "llama-3.3-70b-versatile",
+            "temperature": 0.3,
+            "max_tokens": 512,
+            "messages": [
+                {"role": "system", "content": EVAL_SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+        },
+    )
+    r.raise_for_status()
+    text = r.json()["choices"][0]["message"]["content"]
+    return parse_eval_json(text)
+
+
 # ─── Anthropic ────────────────────────────────────────────
 async def call_anthropic(
     client: httpx.AsyncClient,
@@ -158,6 +186,7 @@ async def call_anthropic(
 PROVIDERS = {
     "ollama": call_ollama,
     "gemini": call_gemini,
+    "groq": call_groq,
     "openai": call_openai,
     "anthropic": call_anthropic,
 }
@@ -178,6 +207,10 @@ async def evaluate_with_provider(
         if not api_key:
             raise ValueError("Google Gemini API key is required")
         return await call_gemini(client, api_key, model, section, question, answer)
+    elif provider == "groq":
+        if not api_key:
+            raise ValueError("Groq API key is required")
+        return await call_groq(client, api_key, model, section, question, answer)
     elif provider == "openai":
         if not api_key:
             raise ValueError("OpenAI API key is required")
