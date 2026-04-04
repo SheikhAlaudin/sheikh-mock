@@ -1,35 +1,59 @@
+import { useState, useEffect } from 'react';
+import Avatar from './Avatar';
+import ScoreReveal from './ScoreReveal';
+
 export default function DoneScreen({ stats, onNewSession, onRetry }) {
   const { avg, answered, correct, partial, incorrect, skipped } = stats;
-  const em = avg >= 80 ? '🎉' : avg >= 60 ? '👍' : avg >= 40 ? '📚' : '💪';
-  const msg = avg >= 80 ? 'Outstanding!' : avg >= 60 ? 'Good work — review the misses.' : avg >= 40 ? 'Keep drilling.' : 'More practice needed.';
+  const [showContent, setShowContent] = useState(false);
+
+  useEffect(() => {
+    const t = setTimeout(() => setShowContent(true), 600);
+    return () => clearTimeout(t);
+  }, []);
+
+  const msg = avg >= 80
+    ? 'Outstanding performance!'
+    : avg >= 60
+      ? 'Good work — review the misses.'
+      : avg >= 40
+        ? 'Keep drilling — you\'re getting there.'
+        : 'More practice needed — consistency is key.';
 
   return (
-    <div className="done">
-      <div className="done-em">{em}</div>
-      <div className="done-sc">{avg}%</div>
-      <div className="done-msg">{msg} · {answered} answered</div>
-      <div className="done-grid">
-        <div className="ds">
-          <div className="ds-n" style={{ color: '#10B981' }}>{correct}</div>
-          <div className="ds-l">Correct</div>
-        </div>
-        <div className="ds">
-          <div className="ds-n" style={{ color: '#F59E0B' }}>{partial}</div>
-          <div className="ds-l">Partial</div>
-        </div>
-        <div className="ds">
-          <div className="ds-n" style={{ color: '#EF4444' }}>{incorrect}</div>
-          <div className="ds-l">Incorrect</div>
-        </div>
-        <div className="ds">
-          <div className="ds-n" style={{ color: 'var(--color-text-tertiary)' }}>{skipped}</div>
-          <div className="ds-l">Skipped</div>
-        </div>
+    <div className="done-screen slide-up">
+      <Avatar state={avg >= 60 ? 'happy' : 'idle'} size={80} />
+
+      <div className="done-score-area">
+        <ScoreReveal score={avg} verdict={avg >= 70 ? 'correct' : avg >= 40 ? 'partial' : 'incorrect'} />
       </div>
-      <div className="done-btns">
-        <button className="dbtn p" onClick={onNewSession}>New Session</button>
-        <button className="dbtn" onClick={onRetry}>Retry Same</button>
-      </div>
+
+      <p className="done-msg">{msg}</p>
+      <p className="done-sub">{answered} question{answered !== 1 ? 's' : ''} answered</p>
+
+      {showContent && (
+        <div className="done-stats slide-up">
+          <div className="stat-row">
+            <StatPill value={correct} label="Correct" color="#64ffda" />
+            <StatPill value={partial} label="Partial" color="#ffd93d" />
+            <StatPill value={incorrect} label="Wrong" color="#ff6b6b" />
+            <StatPill value={skipped} label="Skipped" color="rgba(255,255,255,0.25)" />
+          </div>
+
+          <div className="done-actions">
+            <button className="action-btn primary" onClick={onNewSession}>New Session</button>
+            <button className="action-btn outline" onClick={onRetry}>Retry Same</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatPill({ value, label, color }) {
+  return (
+    <div className="stat-pill">
+      <span className="stat-val" style={{ color }}>{value}</span>
+      <span className="stat-lbl">{label}</span>
     </div>
   );
 }

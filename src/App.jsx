@@ -1,10 +1,12 @@
-import { useState, useCallback } from 'react';
-import { Q, SESSIONS } from './data/questions';
+import { useState, useCallback, useEffect } from 'react';
+import { fetchQuestions, fetchProviders, evaluateAnswer, healthCheck } from './api';
+import { useSettings } from './hooks/useSettings';
+import Particles from './components/Particles';
+import StatusBar from './components/StatusBar';
+import SettingsDrawer from './components/SettingsDrawer';
 import StartScreen from './components/StartScreen';
 import SessionScreen from './components/SessionScreen';
 import DoneScreen from './components/DoneScreen';
-
-const API_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY || '';
 
 function getStats(history) {
   const ans = history.filter(h => h.verdict !== 'skipped');
@@ -22,6 +24,9 @@ function getStats(history) {
 const initial = {
   phase: 'start',
   session: [],
+  sessions: [],
+  questions: [],
+  providers: [],
   idx: 0,
   submittedAnswer: '',
   result: null,
@@ -29,18 +34,51 @@ const initial = {
   attempts: 0,
   showIdeal: false,
   retrySession: [],
+  loading: true,
+  settingsOpen: false,
 };
 
 export default function App() {
   const [s, setS] = useState(initial);
+  const { settings, update: updateSettings } = useSettings();
+
+  useEffect(() => {
+    let cancelled = false;
+    async function init() {
+      try {
+        const [qData, pData] = await Promise.all([fetchQuestions(), fetchProviders()]);
+        if (cancelled) return;
+        setS(prev => ({
+          ...prev,
+          questions: qData.questions,
+          sessions: qData.sessions,
+          providers: pData.providers,
+          loading: false,
+        }));
+      } catch {
+        if (cancelled) return;
+        setS(prev => ({ ...prev, loading: false }));
+      }
+    }
+    init();
+    return () => { cancelled = true; };
+  }, []);
+
+  const currentProvider = s.providers.find(p => p.id === settings.provider);
 
   const startSession = useCallback((id) => {
-    const sess = SESSIONS.find(x => x.id === id);
-    const questions = sess.f ? Q.filter(q => q.day === sess.f) : Q.slice();
-    setS({ ...initial, phase: 'question', session: questions });
+    setS(prev => {
+      const sess = prev.sessions.find(x => x.id === id);
+      const questions = sess.filter
+        ? prev.questions.filter(q => q.day === sess.filter)
+        : prev.questions.slice();
+      return { ...prev, phase: 'question', session: questions, idx: 0, history: [], attempts: 0, submittedAnswer: '', result: null, showIdeal: false };
+    });
   }, []);
 
   const goStart = useCallback(() => setS(prev => ({ ...prev, phase: 'start' })), []);
+  const openSettings = useCallback(() => setS(prev => ({ ...prev, settingsOpen: true })), []);
+  const closeSettings = useCallback(() => setS(prev => ({ ...prev, settingsOpen: false })), []);
 
   const skipQ = useCallback(() => {
     setS(prev => {
@@ -48,7 +86,6 @@ export default function App() {
       const history = [...prev.history];
       const ei = history.findIndex(h => h.qId === entry.qId);
       if (ei >= 0) history[ei] = entry; else history.push(entry);
-
       if (prev.idx + 1 >= prev.session.length) {
         return { ...prev, history, phase: 'done', retrySession: prev.session.slice() };
       }
@@ -77,55 +114,21 @@ export default function App() {
     const q = s.session[s.idx];
     setS(prev => ({ ...prev, submittedAnswer: text, phase: 'thinking' }));
 
-    const prompt = `You are a strict but fair senior JavaScript/React technical interviewer. Candidate has 8+ years of experience.
-
-Section: ${q.s}
-Question: ${q.q}
-Candidate answer: ${text}
-
-Respond with ONLY a raw JSON object. No markdown, no backticks, no explanation outside the JSON:
-{"score":<integer 0-100>,"verdict":"correct"|"partial"|"incorrect","strength":"<what they got right in 1 sentence or Nothing significant>","missing":"<key concept(s) missed in 1 sentence or None>","hint":"<Socratic hint without giving answer — empty string if correct>","ideal":"<ideal answer in 2-3 technical sentences>"}`;
-
     let result;
     try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': API_KEY,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1000,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-      });
-
-      const raw = await res.text();
-      let data;
-      try { data = JSON.parse(raw); } catch { throw new Error('Non-JSON response: ' + raw.slice(0, 120)); }
-      if (data.error) throw new Error('API error: ' + (data.error.message || JSON.stringify(data.error)));
-      if (!data.content?.length) throw new Error('API returned empty content');
-
-      const txt = data.content.filter(c => c.type === 'text').map(c => c.text).join('');
-      const stripped = txt.replace(/```(?:json)?/gi, '').trim();
-      const start = stripped.indexOf('{');
-      const end = stripped.lastIndexOf('}');
-      if (start === -1 || end <= start) throw new Error('No JSON found in: ' + stripped.slice(0, 120));
-
-      let parsed;
-      try { parsed = JSON.parse(stripped.slice(start, end + 1)); } catch (e) { throw new Error('JSON parse failed: ' + e.message); }
-      if (typeof parsed.score !== 'number' || !parsed.verdict) throw new Error('Missing required fields');
-
-      parsed.score = Math.max(0, Math.min(100, Math.round(parsed.score)));
-      result = parsed;
+      result = await evaluateAnswer(
+        q.id,
+        text,
+        settings.provider,
+        settings.apiKey,
+        settings.model,
+      );
+      result.score = Math.max(0, Math.min(100, Math.round(result.score)));
     } catch (e) {
       result = {
         score: 0, verdict: 'incorrect',
-        strength: 'Evaluation error — tap Try Again to resubmit.',
-        missing: 'Error detail: ' + e.message.slice(0, 140),
+        strength: 'Evaluation error — try again.',
+        missing: e.message.slice(0, 200),
         hint: '', ideal: '',
       };
     }
@@ -138,36 +141,62 @@ Respond with ONLY a raw JSON object. No markdown, no backticks, no explanation o
       if (ei >= 0) history[ei] = entry; else history.push(entry);
       return { ...prev, result, history, attempts: newAttempts, phase: 'result' };
     });
-  }, [s.session, s.idx]);
+  }, [s.session, s.idx, settings]);
 
   const stats = getStats(s.history);
 
-  if (s.phase === 'start') return <StartScreen onStart={startSession} />;
-
-  if (s.phase === 'done') return (
-    <DoneScreen
-      stats={stats}
-      onNewSession={goStart}
-      onRetry={() => setS({ ...initial, phase: 'question', session: s.retrySession })}
-    />
-  );
-
   return (
-    <SessionScreen
-      session={s.session}
-      idx={s.idx}
-      phase={s.phase}
-      submittedAnswer={s.submittedAnswer}
-      result={s.result}
-      showIdeal={s.showIdeal}
-      attempts={s.attempts}
-      stats={stats}
-      onSubmit={submitAnswer}
-      onNext={nextQ}
-      onSkip={skipQ}
-      onRetry={retryQ}
-      onToggleIdeal={toggleIdeal}
-      onGoStart={goStart}
-    />
+    <div className="app">
+      <Particles />
+
+      <div className="app-content">
+        {/* Header with settings */}
+        <div className="app-header">
+          <StatusBar
+            provider={currentProvider}
+            settings={settings}
+            onOpenSettings={openSettings}
+          />
+        </div>
+
+        {/* Loading */}
+        {s.loading && (
+          <div className="loading">
+            <div className="think-dots"><span /><span /><span /></div>
+            <p>Connecting...</p>
+          </div>
+        )}
+
+        {/* Screens */}
+        {!s.loading && s.phase === 'start' && (
+          <StartScreen sessions={s.sessions} onStart={startSession} />
+        )}
+        {!s.loading && s.phase === 'done' && (
+          <DoneScreen
+            stats={stats}
+            onNewSession={goStart}
+            onRetry={() => setS(prev => ({ ...prev, phase: 'question', session: prev.retrySession, idx: 0, history: [], attempts: 0, submittedAnswer: '', result: null, showIdeal: false }))}
+          />
+        )}
+        {!s.loading && ['question', 'thinking', 'result'].includes(s.phase) && (
+          <SessionScreen
+            session={s.session} idx={s.idx} phase={s.phase}
+            submittedAnswer={s.submittedAnswer} result={s.result}
+            showIdeal={s.showIdeal} attempts={s.attempts} stats={stats}
+            onSubmit={submitAnswer} onNext={nextQ} onSkip={skipQ}
+            onRetry={retryQ} onToggleIdeal={toggleIdeal} onGoStart={goStart}
+          />
+        )}
+      </div>
+
+      {/* Settings drawer */}
+      <SettingsDrawer
+        open={s.settingsOpen}
+        onClose={closeSettings}
+        settings={settings}
+        onUpdate={updateSettings}
+        providers={s.providers}
+      />
+    </div>
   );
 }

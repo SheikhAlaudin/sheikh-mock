@@ -1,11 +1,17 @@
 import { useState, useRef, useCallback } from 'react';
 import { useVoice } from '../hooks/useVoice';
+import { useTypewriter } from '../hooks/useTypewriter';
+import Avatar from './Avatar';
+import ScoreReveal from './ScoreReveal';
+import WaveformVisualizer from './WaveformVisualizer';
 
-export default function SessionScreen({ session, idx, phase, submittedAnswer, result, showIdeal, attempts, stats,
-  onSubmit, onNext, onSkip, onRetry, onToggleIdeal, onGoStart }) {
-
+export default function SessionScreen({
+  session, idx, phase, submittedAnswer, result, showIdeal, attempts, stats,
+  onSubmit, onNext, onSkip, onRetry, onToggleIdeal, onGoStart,
+}) {
   const [error, setError] = useState('');
   const taRef = useRef(null);
+  const q = session[idx];
 
   const handleTranscript = useCallback((text) => {
     if (!taRef.current) return;
@@ -15,153 +21,173 @@ export default function SessionScreen({ session, idx, phase, submittedAnswer, re
   }, []);
 
   const { isRecording, hasMic, label, toggle, stop } = useVoice(handleTranscript);
+  const { displayed: typedQuestion, done: typingDone, skip: skipTyping } = useTypewriter(
+    phase === 'question' || phase === 'thinking' || phase === 'result' ? q.q : '',
+    22
+  );
 
   const handleSubmit = () => {
     const text = taRef.current?.value.trim() || '';
-    if (!text) { setError('Please write or speak an answer before submitting.'); return; }
+    if (!text) { setError('Write or speak an answer first.'); return; }
     setError('');
     stop();
     onSubmit(text);
   };
 
+  const handleRetry = () => { stop(); if (taRef.current) taRef.current.value = ''; onRetry(); };
   const handleSkip = () => { stop(); onSkip(); };
   const handleNext = () => { stop(); onNext(); };
-  const handleRetry = () => { stop(); onRetry(); };
 
-  const q = session[idx];
-  const prog = (idx / session.length) * 100;
+  const prog = ((idx + (phase === 'result' ? 1 : 0)) / session.length) * 100;
 
-  const Header = () => (
-    <>
-      <div className="hdr">
-        <div className="hdr-l">
-          {q.s} · Q{idx + 1}/{session.length}
-          {attempts > 1 && <span className="atag">Attempt {attempts}</span>}
+  // Avatar state
+  const avatarState =
+    phase === 'thinking' ? 'thinking' :
+    phase === 'result' && result?.verdict === 'correct' ? 'happy' :
+    phase === 'result' && result?.verdict === 'incorrect' ? 'disappointed' :
+    (!typingDone && phase === 'question') ? 'speaking' :
+    'idle';
+
+  return (
+    <div className="interview-screen slide-up">
+      {/* Top bar */}
+      <div className="interview-top">
+        <button className="ghost-btn" onClick={onGoStart}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="15 18 9 12 15 6" /></svg>
+          Back
+        </button>
+        <div className="interview-meta">
+          <span className="meta-section">{q.s}</span>
+          <span className="meta-divider">·</span>
+          <span className="meta-progress">Q{idx + 1}/{session.length}</span>
+          {attempts > 1 && <span className="meta-attempt">Attempt {attempts}</span>}
         </div>
-        <div className="hdr-r">
-          {stats.answered > 0 && <span className="spill">{stats.avg}% avg</span>}
-          <button className="back" onClick={onGoStart}>← Sessions</button>
-        </div>
+        {stats.answered > 0 && <span className="avg-badge">{stats.avg}%</span>}
       </div>
-      <div className="prog"><div className="prog-fill" style={{ width: `${prog}%` }} /></div>
-    </>
-  );
 
-  const QuestionCard = () => (
-    <div className="qcard">
-      <div className="qtags">
-        <span className="qtag">{q.s}</span>
-        <span className="qtag">Day {q.day}</span>
-        <span className="qn">Q{idx + 1} of {session.length}</span>
+      {/* Progress */}
+      <div className="progress-bar">
+        <div className="progress-fill" style={{ width: `${prog}%` }} />
       </div>
-      <div className="qtext">{q.q}</div>
-    </div>
-  );
 
-  const YourAnswer = () => submittedAnswer ? (
-    <div className="your-ans">
-      <div className="ya-lbl">Your answer</div>
-      <div className="ya-text">{submittedAnswer}</div>
-    </div>
-  ) : null;
-
-  if (phase === 'question') {
-    return (
-      <>
-        <Header />
-        <QuestionCard />
-        <div className="voice-row">
-          <div className={`rdot${isRecording ? ' on' : ''}`} />
-          <span className="vlbl">{label}</span>
-          {hasMic && (
-            <button className={`vbtn${isRecording ? ' on' : ''}`} onClick={toggle}>
-              {isRecording ? '⏹ Stop Voice' : '🎤 Voice'}
-            </button>
-          )}
-        </div>
-        <textarea
-          ref={taRef}
-          className="ans-ta"
-          placeholder="Type your answer here, or use the Voice button above..."
-          autoFocus
-        />
-        <div className="ctrl">
-          <button className="btn-sub" onClick={handleSubmit}>Submit Answer</button>
-          <button className="btn-skip" onClick={handleSkip}>Skip this question</button>
-        </div>
-        {error && <div className="err">{error}</div>}
-      </>
-    );
-  }
-
-  if (phase === 'thinking') {
-    return (
-      <>
-        <Header />
-        <QuestionCard />
-        <YourAnswer />
-        <div className="thinking">
-          <div className="spinner" />
-          <span>Evaluating your answer...</span>
-        </div>
-      </>
-    );
-  }
-
-  if (phase === 'result' && result) {
-    const vc = result.verdict === 'correct' ? 'correct' : result.verdict === 'partial' ? 'partial' : 'incorrect';
-    const vi = result.verdict === 'correct' ? '✓' : result.verdict === 'partial' ? '≈' : '✗';
-    const vt = result.verdict === 'correct' ? 'Correct' : result.verdict === 'partial' ? 'Partially Correct' : 'Incorrect';
-    const isLast = idx + 1 >= session.length;
-
-    return (
-      <>
-        <Header />
-        <QuestionCard />
-        <YourAnswer />
-        <div className={`rcard ${vc}`}>
-          <div className="rv">
-            <span className="rv-icon">{vi}</span>
-            <span className="rv-lbl">{vt}</span>
-            <span className="rv-sc">{result.score}%</span>
+      {/* Interviewer area */}
+      <div className="interviewer-area">
+        <Avatar state={avatarState} size={72} />
+        <div className="interviewer-bubble">
+          <div className="bubble-tags">
+            <span className="bubble-tag">{q.s}</span>
+            <span className="bubble-tag">Day {q.day}</span>
           </div>
-          {result.strength && result.strength !== 'Nothing significant' && (
-            <div className="rrow">
-              <div className="rlbl">What you got right</div>
-              <div className="rval">{result.strength}</div>
-            </div>
-          )}
-          {result.missing && result.missing !== 'None' && (
-            <div className="rrow">
-              <div className="rlbl">What was missing</div>
-              <div className="rval">{result.missing}</div>
-            </div>
-          )}
-          {result.hint && (
-            <div className="rrow">
-              <div className="rlbl">Hint for retry</div>
-              <div className="rval">{result.hint}</div>
-            </div>
-          )}
-          <button className="itog" onClick={onToggleIdeal}>
-            {showIdeal ? 'Hide ideal answer ▲' : 'Show ideal answer ▼'}
-          </button>
-          {showIdeal && result.ideal && <div className="ibox">{result.ideal}</div>}
+          <p className="bubble-text" onClick={!typingDone ? skipTyping : undefined}>
+            {typedQuestion}
+            {!typingDone && <span className="cursor-blink">|</span>}
+          </p>
+          {!typingDone && <p className="tap-hint">tap to skip animation</p>}
         </div>
-        <div className="nav">
-          {result.verdict !== 'correct' && (
-            <button className="nbtn n-r" onClick={handleRetry}>↺ Try Again</button>
-          )}
-          <button className="nbtn n-nx" onClick={handleNext}>
-            {isLast ? 'Finish Session' : 'Next Question →'}
-          </button>
-          {result.verdict !== 'correct' && (
-            <button className="nbtn n-sk" onClick={handleSkip}>Skip</button>
-          )}
-        </div>
-      </>
-    );
-  }
+      </div>
 
-  return <><Header /><QuestionCard /></>;
+      {/* Answer phase */}
+      {phase === 'question' && (
+        <div className="answer-area slide-up">
+          <div className="voice-controls">
+            <WaveformVisualizer active={isRecording} />
+            {hasMic && (
+              <button className={`voice-toggle${isRecording ? ' active' : ''}`} onClick={toggle}>
+                {isRecording ? '⏹ Stop' : '🎤 Voice'}
+              </button>
+            )}
+          </div>
+          <textarea
+            ref={taRef}
+            className="answer-input"
+            placeholder="Type or speak your answer..."
+            autoFocus
+          />
+          {error && <div className="inline-error">{error}</div>}
+          <div className="answer-actions">
+            <button className="action-btn primary" onClick={handleSubmit}>
+              Submit Answer
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+            </button>
+            <button className="action-btn ghost" onClick={handleSkip}>Skip</button>
+          </div>
+        </div>
+      )}
+
+      {/* Thinking phase */}
+      {phase === 'thinking' && (
+        <div className="thinking-area slide-up">
+          <div className="your-answer-box">
+            <span className="ya-label">Your answer</span>
+            <p className="ya-text">{submittedAnswer}</p>
+          </div>
+          <div className="thinking-indicator">
+            <div className="think-dots">
+              <span /><span /><span />
+            </div>
+            <span>Evaluating your answer...</span>
+          </div>
+        </div>
+      )}
+
+      {/* Result phase */}
+      {phase === 'result' && result && (
+        <div className="result-area slide-up">
+          <div className="your-answer-box">
+            <span className="ya-label">Your answer</span>
+            <p className="ya-text">{submittedAnswer}</p>
+          </div>
+
+          <div className={`result-panel ${result.verdict}`}>
+            <div className="result-top">
+              <ScoreReveal score={result.score} verdict={result.verdict} />
+              <div className="result-verdict-info">
+                <span className="verdict-text">
+                  {result.verdict === 'correct' ? 'Correct' : result.verdict === 'partial' ? 'Partially Correct' : 'Incorrect'}
+                </span>
+                {result.strength && result.strength !== 'Nothing significant' && (
+                  <div className="feedback-row">
+                    <span className="fb-label">Strength</span>
+                    <p className="fb-value">{result.strength}</p>
+                  </div>
+                )}
+                {result.missing && result.missing !== 'None' && (
+                  <div className="feedback-row">
+                    <span className="fb-label">Missing</span>
+                    <p className="fb-value">{result.missing}</p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {result.hint && (
+              <div className="hint-box">
+                <span className="hint-icon">💡</span>
+                <p>{result.hint}</p>
+              </div>
+            )}
+
+            <button className="ideal-btn" onClick={onToggleIdeal}>
+              {showIdeal ? 'Hide ideal answer ▲' : 'Show ideal answer ▼'}
+            </button>
+            {showIdeal && result.ideal && (
+              <div className="ideal-answer">{result.ideal}</div>
+            )}
+          </div>
+
+          <div className="answer-actions">
+            {result.verdict !== 'correct' && (
+              <button className="action-btn outline" onClick={handleRetry}>↺ Try Again</button>
+            )}
+            <button className="action-btn primary" onClick={handleNext}>
+              {idx + 1 >= session.length ? 'Finish Session' : 'Next Question →'}
+            </button>
+            {result.verdict !== 'correct' && (
+              <button className="action-btn ghost ml-auto" onClick={handleSkip}>Skip</button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
