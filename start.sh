@@ -74,16 +74,25 @@ echo ""
 # ── Install backend dependencies ──
 echo -e "${CYAN}Installing backend dependencies...${NC}"
 cd "$ROOT/backend"
-$PYTHON -m pip install -r requirements.txt --quiet 2>&1 | grep -v "already satisfied" || true
+if ! $PYTHON -m pip install -r requirements.txt; then
+  echo -e "${RED}✗ Backend dependency install failed${NC}"
+  exit 1
+fi
 echo -e "${GREEN}✓ Backend dependencies ready${NC}"
 
 # ── Install frontend dependencies ──
 echo -e "${CYAN}Installing frontend dependencies...${NC}"
 cd "$ROOT"
-if [ ! -d "node_modules" ]; then
-  npm install --silent 2>&1 | tail -1
+if [ -f "package-lock.json" ]; then
+  if ! npm ci; then
+    echo -e "${RED}✗ Frontend dependency install failed${NC}"
+    exit 1
+  fi
 else
-  echo "  node_modules exists, skipping install"
+  if ! npm install; then
+    echo -e "${RED}✗ Frontend dependency install failed${NC}"
+    exit 1
+  fi
 fi
 echo -e "${GREEN}✓ Frontend dependencies ready${NC}"
 echo ""

@@ -1,7 +1,7 @@
 /**
  * API client — multi-provider backend.
  */
-const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const BASE = import.meta.env.VITE_API_URL || '';
 
 export async function fetchQuestions() {
   const res = await fetch(`${BASE}/api/questions`);
@@ -89,6 +89,7 @@ export async function generateFromFile(file, provider, apiKey, model) {
 export async function healthCheck() {
   try {
     const res = await fetch(`${BASE}/api/health`);
+    if (!res.ok) throw new Error('Health check failed');
     return res.json();
   } catch {
     return { status: 'unreachable', ollama: false };

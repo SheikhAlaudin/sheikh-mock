@@ -22,16 +22,16 @@ echo.
 REM ── Install backend deps ──
 echo Installing backend dependencies...
 cd /d "%~dp0backend"
-python -m pip install -r requirements.txt --quiet 2>nul
+python -m pip install -r requirements.txt || (echo [ERROR] Backend dependency install failed && pause && exit /b 1)
 echo [OK] Backend dependencies ready
 
 REM ── Install frontend deps ──
 echo Installing frontend dependencies...
 cd /d "%~dp0"
-if not exist "node_modules" (
-    npm install --silent 2>nul
+if exist "package-lock.json" (
+    npm ci || (echo [ERROR] Frontend dependency install failed && pause && exit /b 1)
 ) else (
-    echo   node_modules exists, skipping
+    npm install || (echo [ERROR] Frontend dependency install failed && pause && exit /b 1)
 )
 echo [OK] Frontend dependencies ready
 echo.

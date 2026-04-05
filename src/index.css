@@ -151,6 +151,25 @@ html, body {
   max-width: 420px;
 }
 
+.notice-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  margin: 0 0 14px;
+  border-radius: var(--radius);
+  background: rgba(255, 107, 107, 0.08);
+  border: 1px solid rgba(255, 107, 107, 0.22);
+  color: var(--text-1);
+  text-align: left;
+}
+.notice-card p {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-2);
+}
+
 /* Session tiles */
 .session-grid {
   display: flex;
@@ -1053,6 +1072,10 @@ html, body {
 
 /* ── Responsive ── */
 @media (max-width: 600px) {
+  .notice-card {
+    flex-direction: column;
+    align-items: stretch;
+  }
   .interviewer-area {
     flex-direction: column;
     align-items: center;

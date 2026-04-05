@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
-import { fetchQuestions, fetchProviders, evaluateAnswer, generateQuestions, generateFromFile } from './api';
+import { fetchQuestions, fetchProviders, evaluateAnswer, generateQuestions, generateFromFile, healthCheck } from './api';
 import { useSettings } from './hooks/useSettings';
 import Particles from './components/Particles';
 import StatusBar from './components/StatusBar';
@@ -28,7 +28,9 @@ const initial = {
   sessions: [],
   questions: [],
   providers: [],
+  health: null,
   idx: 0,
+  draftAnswer: '',
   submittedAnswer: '',
   result: null,
   history: [],
@@ -37,52 +39,90 @@ const initial = {
   retrySession: [],
   loading: true,
   settingsOpen: false,
+  errorMessage: '',
 };
 
 export default function App() {
   const [s, setS] = useState(initial);
   const { settings, update: updateSettings } = useSettings();
 
-  useEffect(() => {
-    let cancelled = false;
-    async function init() {
-      try {
-        const [qData, pData] = await Promise.all([fetchQuestions(), fetchProviders()]);
-        if (cancelled) return;
-        setS(prev => ({
-          ...prev,
-          questions: qData.questions,
-          sessions: qData.sessions,
-          providers: pData.providers,
-          loading: false,
-        }));
-      } catch {
-        if (cancelled) return;
-        setS(prev => ({ ...prev, loading: false }));
-      }
+  const loadInitialData = useCallback(async () => {
+    setS(prev => ({ ...prev, loading: true, errorMessage: '' }));
+
+    try {
+      const [qData, pData, health] = await Promise.all([
+        fetchQuestions(),
+        fetchProviders(),
+        healthCheck(),
+      ]);
+
+      setS(prev => ({
+        ...prev,
+        questions: qData.questions,
+        sessions: qData.sessions,
+        providers: pData.providers,
+        health,
+        loading: false,
+        errorMessage: '',
+      }));
+    } catch {
+      setS(prev => ({
+        ...prev,
+        health: { status: 'unreachable', ollama: false },
+        loading: false,
+        errorMessage: 'Could not connect to the backend. Start the API server and retry.',
+      }));
     }
-    init();
-    return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    void loadInitialData();
+  }, [loadInitialData]);
 
   const currentProvider = s.providers.find(p => p.id === settings.provider);
 
   const startSession = useCallback((id) => {
     setS(prev => {
       const sess = prev.sessions.find(x => x.id === id);
+      if (!sess) {
+        return { ...prev, errorMessage: 'That session is no longer available. Refresh and try again.' };
+      }
+
       const questions = sess.filter
         ? prev.questions.filter(q => q.day === sess.filter)
         : prev.questions.slice();
-      return { ...prev, phase: 'question', session: questions, idx: 0, history: [], attempts: 0, submittedAnswer: '', result: null, showIdeal: false };
+
+      return {
+        ...prev,
+        phase: 'question',
+        session: questions,
+        retrySession: questions.slice(),
+        idx: 0,
+        draftAnswer: '',
+        submittedAnswer: '',
+        result: null,
+        history: [],
+        attempts: 0,
+        showIdeal: false,
+        errorMessage: '',
+      };
     });
   }, []);
 
-  const goStart = useCallback(() => setS(prev => ({ ...prev, phase: 'start' })), []);
+  const goStart = useCallback(() => setS(prev => ({
+    ...prev,
+    phase: 'start',
+    draftAnswer: '',
+    submittedAnswer: '',
+    result: null,
+    showIdeal: false,
+    errorMessage: '',
+  })), []);
 
-  const goUpload = useCallback(() => setS(prev => ({ ...prev, phase: 'upload' })), []);
+  const goUpload = useCallback(() => setS(prev => ({ ...prev, phase: 'upload', errorMessage: '' })), []);
 
   const startFileSession = useCallback(async (file) => {
-    setS(prev => ({ ...prev, loading: true }));
+    setS(prev => ({ ...prev, loading: true, errorMessage: '' }));
     try {
       const data = await generateFromFile(
         file,
@@ -95,7 +135,9 @@ export default function App() {
         loading: false,
         phase: 'question',
         session: data.questions,
+        retrySession: data.questions.slice(),
         idx: 0,
+        draftAnswer: '',
         history: [],
         attempts: 0,
         submittedAnswer: '',
@@ -109,7 +151,7 @@ export default function App() {
   }, [settings]);
 
   const startAISession = useCallback(async (topic, count) => {
-    setS(prev => ({ ...prev, loading: true }));
+    setS(prev => ({ ...prev, loading: true, errorMessage: '' }));
     try {
       const data = await generateQuestions(
         settings.provider,
@@ -123,7 +165,9 @@ export default function App() {
         loading: false,
         phase: 'question',
         session: data.questions,
+        retrySession: data.questions.slice(),
         idx: 0,
+        draftAnswer: '',
         history: [],
         attempts: 0,
         submittedAnswer: '',
@@ -131,10 +175,14 @@ export default function App() {
         showIdeal: false,
       }));
     } catch (e) {
-      alert('Failed to generate questions: ' + e.message);
-      setS(prev => ({ ...prev, loading: false }));
+      setS(prev => ({
+        ...prev,
+        loading: false,
+        errorMessage: `Failed to generate questions: ${e.message}`,
+      }));
     }
   }, [settings]);
+
   const openSettings = useCallback(() => setS(prev => ({ ...prev, settingsOpen: true })), []);
   const closeSettings = useCallback(() => setS(prev => ({ ...prev, settingsOpen: false })), []);
 
@@ -142,12 +190,24 @@ export default function App() {
     setS(prev => {
       const entry = { qId: prev.session[prev.idx].id, verdict: 'skipped', score: 0, attempts: 0 };
       const history = [...prev.history];
-      const ei = history.findIndex(h => h.qId === entry.qId);
-      if (ei >= 0) history[ei] = entry; else history.push(entry);
+      const existingIndex = history.findIndex(h => h.qId === entry.qId);
+      if (existingIndex >= 0) history[existingIndex] = entry; else history.push(entry);
+
       if (prev.idx + 1 >= prev.session.length) {
         return { ...prev, history, phase: 'done', retrySession: prev.session.slice() };
       }
-      return { ...prev, history, idx: prev.idx + 1, attempts: 0, submittedAnswer: '', result: null, showIdeal: false, phase: 'question' };
+
+      return {
+        ...prev,
+        history,
+        idx: prev.idx + 1,
+        attempts: 0,
+        draftAnswer: '',
+        submittedAnswer: '',
+        result: null,
+        showIdeal: false,
+        phase: 'question',
+      };
     });
   }, []);
 
@@ -156,12 +216,22 @@ export default function App() {
       if (prev.idx + 1 >= prev.session.length) {
         return { ...prev, phase: 'done', retrySession: prev.session.slice() };
       }
-      return { ...prev, idx: prev.idx + 1, attempts: 0, submittedAnswer: '', result: null, showIdeal: false, phase: 'question' };
+
+      return {
+        ...prev,
+        idx: prev.idx + 1,
+        attempts: 0,
+        draftAnswer: '',
+        submittedAnswer: '',
+        result: null,
+        showIdeal: false,
+        phase: 'question',
+      };
     });
   }, []);
 
   const retryQ = useCallback(() => {
-    setS(prev => ({ ...prev, submittedAnswer: '', result: null, showIdeal: false, phase: 'question' }));
+    setS(prev => ({ ...prev, draftAnswer: '', submittedAnswer: '', result: null, showIdeal: false, phase: 'question' }));
   }, []);
 
   const toggleIdeal = useCallback(() => {
@@ -170,7 +240,9 @@ export default function App() {
 
   const submitAnswer = useCallback(async (text) => {
     const q = s.session[s.idx];
-    setS(prev => ({ ...prev, submittedAnswer: text, phase: 'thinking' }));
+    if (!q) return;
+
+    setS(prev => ({ ...prev, draftAnswer: text, submittedAnswer: text, phase: 'thinking' }));
 
     let result;
     try {
@@ -184,10 +256,12 @@ export default function App() {
       result.score = Math.max(0, Math.min(100, Math.round(result.score)));
     } catch (e) {
       result = {
-        score: 0, verdict: 'incorrect',
+        score: 0,
+        verdict: 'incorrect',
         strength: 'Evaluation error — try again.',
         missing: e.message.slice(0, 200),
-        hint: '', ideal: '',
+        hint: '',
+        ideal: '',
       };
     }
 
@@ -195,8 +269,8 @@ export default function App() {
       const newAttempts = prev.attempts + 1;
       const history = [...prev.history];
       const entry = { qId: q.id, verdict: result.verdict, score: result.score, attempts: newAttempts };
-      const ei = history.findIndex(h => h.qId === q.id);
-      if (ei >= 0) history[ei] = entry; else history.push(entry);
+      const existingIndex = history.findIndex(h => h.qId === q.id);
+      if (existingIndex >= 0) history[existingIndex] = entry; else history.push(entry);
       return { ...prev, result, history, attempts: newAttempts, phase: 'result' };
     });
   }, [s.session, s.idx, settings]);
@@ -208,16 +282,15 @@ export default function App() {
       <Particles />
 
       <div className="app-content">
-        {/* Header with settings */}
         <div className="app-header">
           <StatusBar
             provider={currentProvider}
             settings={settings}
+            health={s.health}
             onOpenSettings={openSettings}
           />
         </div>
 
-        {/* Loading */}
         {s.loading && (
           <div className="loading">
             <div className="think-dots"><span /><span /><span /></div>
@@ -225,9 +298,15 @@ export default function App() {
           </div>
         )}
 
-        {/* Screens */}
         {!s.loading && s.phase === 'start' && (
-          <StartScreen sessions={s.sessions} onStart={startSession} onGenerateAI={startAISession} onUpload={goUpload} />
+          <StartScreen
+            sessions={s.sessions}
+            onStart={startSession}
+            onGenerateAI={startAISession}
+            onUpload={goUpload}
+            errorMessage={s.errorMessage}
+            onRetryInit={loadInitialData}
+          />
         )}
         {!s.loading && s.phase === 'upload' && (
           <UploadPage onGenerateFromFile={startFileSession} onBack={goStart} />
@@ -236,22 +315,43 @@ export default function App() {
           <DoneScreen
             stats={stats}
             onNewSession={goStart}
-            onRetry={() => setS(prev => ({ ...prev, phase: 'question', session: prev.retrySession, idx: 0, history: [], attempts: 0, submittedAnswer: '', result: null, showIdeal: false }))}
+            onRetry={() => setS(prev => ({
+              ...prev,
+              phase: 'question',
+              session: prev.retrySession,
+              idx: 0,
+              history: [],
+              attempts: 0,
+              draftAnswer: '',
+              submittedAnswer: '',
+              result: null,
+              showIdeal: false,
+            }))}
           />
         )}
         {!s.loading && ['question', 'thinking', 'result'].includes(s.phase) && (
           <SessionScreen
-            session={s.session} idx={s.idx} phase={s.phase}
-            submittedAnswer={s.submittedAnswer} result={s.result}
-            showIdeal={s.showIdeal} attempts={s.attempts} stats={stats}
-            onSubmit={submitAnswer} onNext={nextQ} onSkip={skipQ}
-            onRetry={retryQ} onToggleIdeal={toggleIdeal} onGoStart={goStart}
-            groqApiKey={settings.provider === 'groq' ? settings.apiKey : (import.meta.env.VITE_GROQ_API_KEY || '')}
+            session={s.session}
+            idx={s.idx}
+            phase={s.phase}
+            draftAnswer={s.draftAnswer}
+            submittedAnswer={s.submittedAnswer}
+            result={s.result}
+            showIdeal={s.showIdeal}
+            attempts={s.attempts}
+            stats={stats}
+            onDraftChange={(draftAnswer) => setS(prev => ({ ...prev, draftAnswer }))}
+            onSubmit={submitAnswer}
+            onNext={nextQ}
+            onSkip={skipQ}
+            onRetry={retryQ}
+            onToggleIdeal={toggleIdeal}
+            onGoStart={goStart}
+            groqApiKey={settings.provider === 'groq' ? settings.apiKey : ''}
           />
         )}
       </div>
 
-      {/* Settings drawer */}
       <SettingsDrawer
         open={s.settingsOpen}
         onClose={closeSettings}

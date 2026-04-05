@@ -1,23 +1,26 @@
 import { useState, useEffect } from 'react';
 
-// Pre-filled keys from env (public-safe ones only — Groq is set via .env)
-const ENV_GROQ_KEY = import.meta.env.VITE_GROQ_API_KEY || '';
-
 export default function SettingsDrawer({ open, onClose, settings, onUpdate, providers }) {
   const [local, setLocal] = useState({ ...settings });
   const [showKey, setShowKey] = useState(false);
 
   useEffect(() => {
     if (open) {
-      // Auto-fill Groq key from env if user hasn't saved one yet
-      const saved = { ...settings };
-      if (!saved.apiKey && saved.provider === 'groq' && ENV_GROQ_KEY) {
-        saved.apiKey = ENV_GROQ_KEY;
-      }
-      setLocal(saved);
+      setLocal({ ...settings });
       setShowKey(false);
     }
   }, [open, settings]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') onClose();
+    };
+
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [open, onClose]);
 
   const currentProvider = providers.find(p => p.id === local.provider);
 
@@ -26,9 +29,28 @@ export default function SettingsDrawer({ open, onClose, settings, onUpdate, prov
     onClose();
   };
 
+  const updateActiveProfile = (patch) => {
+    setLocal(prev => ({
+      ...prev,
+      ...patch,
+      profiles: {
+        ...prev.profiles,
+        [prev.provider]: {
+          ...(prev.profiles?.[prev.provider] || {}),
+          ...patch,
+        },
+      },
+    }));
+  };
+
   const handleProviderSwitch = (providerId) => {
-    const autoKey = providerId === 'groq' && ENV_GROQ_KEY ? ENV_GROQ_KEY : '';
-    setLocal({ ...local, provider: providerId, model: '', apiKey: autoKey });
+    const profile = local.profiles?.[providerId] || { apiKey: '', model: '' };
+    setLocal(prev => ({
+      ...prev,
+      provider: providerId,
+      apiKey: profile.apiKey || '',
+      model: profile.model || '',
+    }));
     setShowKey(false);
   };
 
@@ -36,10 +58,16 @@ export default function SettingsDrawer({ open, onClose, settings, onUpdate, prov
 
   return (
     <div className="drawer-overlay" onClick={onClose}>
-      <div className="drawer" onClick={e => e.stopPropagation()}>
+      <div
+        className="drawer"
+        onClick={e => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-title"
+      >
         <div className="drawer-header">
-          <h2 className="drawer-title">Settings</h2>
-          <button className="drawer-close" onClick={onClose}>
+          <h2 className="drawer-title" id="settings-title">Settings</h2>
+          <button className="drawer-close" type="button" onClick={onClose} aria-label="Close settings">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>
@@ -51,12 +79,13 @@ export default function SettingsDrawer({ open, onClose, settings, onUpdate, prov
             {providers.map(p => (
               <button
                 key={p.id}
+                type="button"
                 className={`provider-card${local.provider === p.id ? ' active' : ''}`}
                 onClick={() => handleProviderSwitch(p.id)}
               >
                 <span className="provider-icon">{providerIcon(p.id)}</span>
                 <span className="provider-name">{p.name}</span>
-                {p.id === 'groq' && ENV_GROQ_KEY && <span className="provider-badge groq-badge">Key ready</span>}
+                {p.server_key_available && <span className="provider-badge">Server key</span>}
                 {!p.needs_key && <span className="provider-badge">Free</span>}
               </button>
             ))}
@@ -72,7 +101,7 @@ export default function SettingsDrawer({ open, onClose, settings, onUpdate, prov
                   className="field-input"
                   placeholder={`Paste your ${currentProvider.name} API key...`}
                   value={local.apiKey}
-                  onChange={e => setLocal({ ...local, apiKey: e.target.value })}
+                  onChange={e => updateActiveProfile({ apiKey: e.target.value })}
                   autoComplete="off"
                 />
                 <button
@@ -90,9 +119,14 @@ export default function SettingsDrawer({ open, onClose, settings, onUpdate, prov
                   <a href="https://console.groq.com" target="_blank" rel="noreferrer">console.groq.com</a>
                 </p>
               )}
-              {local.provider !== 'groq' && (
-                <p className="field-hint">Stored locally in your browser. Never sent to our servers.</p>
+              {currentProvider?.server_key_available && !local.apiKey && (
+                <p className="field-hint">
+                  A backend env key is available for this provider. Leave this blank to use it, or paste a key here to override it locally.
+                </p>
               )}
+              <p className="field-hint">
+                Stored locally in your browser and sent only to your configured backend when a provider request is made.
+              </p>
             </>
           )}
 
@@ -103,7 +137,7 @@ export default function SettingsDrawer({ open, onClose, settings, onUpdate, prov
               <select
                 className="field-select"
                 value={local.model || currentProvider.default_model}
-                onChange={e => setLocal({ ...local, model: e.target.value })}
+                onChange={e => updateActiveProfile({ model: e.target.value })}
               >
                 {currentProvider.models.map(m => (
                   <option key={m} value={m}>{m}{m === currentProvider.default_model ? ' (default)' : ''}</option>
@@ -114,7 +148,7 @@ export default function SettingsDrawer({ open, onClose, settings, onUpdate, prov
         </div>
 
         <div className="drawer-footer">
-          <button className="btn-save" onClick={handleSave}>Save Settings</button>
+          <button className="btn-save" type="button" onClick={handleSave}>Save Settings</button>
         </div>
       </div>
     </div>

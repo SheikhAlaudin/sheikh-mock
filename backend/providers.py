@@ -1,16 +1,54 @@
 """
 Multi-provider LLM abstraction.
-Supports: Ollama (local), Google Gemini, OpenAI, Anthropic.
+Supports: Ollama (local), Groq, Google Gemini, OpenAI, Anthropic.
 """
 
+from __future__ import annotations
+
 import json
-import re
 import os
+import re
+
 import httpx
 
-# ── Hardcoded fallback keys (used when no key is passed from frontend) ──
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
-GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "YOUR_GROQ_API_KEY_HERE")
+ENV_KEY_NAMES = {
+    "gemini": "GEMINI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+}
+PROVIDER_DISPLAY_NAMES = {
+    "gemini": "Google Gemini",
+    "groq": "Groq",
+    "openai": "OpenAI",
+    "anthropic": "Anthropic",
+}
+
+
+class ClientInputError(ValueError):
+    """Invalid user input or missing configuration."""
+
+
+class ProviderResponseError(RuntimeError):
+    """Provider returned a response we could not use safely."""
+
+
+def resolve_api_key(provider: str, api_key: str) -> str:
+    if provider == "ollama":
+        return ""
+
+    if provider not in PROVIDER_DISPLAY_NAMES:
+        raise ClientInputError(f"Unknown provider: {provider}")
+
+    if api_key and api_key.strip():
+        return api_key.strip()
+
+    env_name = ENV_KEY_NAMES[provider]
+    env_value = os.environ.get(env_name, "").strip()
+    if env_value:
+        return env_value
+
+    raise ClientInputError(f"{PROVIDER_DISPLAY_NAMES[provider]} API key is required")
 
 EVAL_SYSTEM = (
     "You are a senior JavaScript/React technical interviewer evaluating a candidate with 8+ years of experience. "
@@ -121,7 +159,6 @@ async def call_gemini(
     question: str,
     answer: str,
 ) -> dict:
-    api_key = api_key or GEMINI_API_KEY
     prompt = build_eval_prompt(section, question, answer)
     model_name = model or "gemini-2.5-flash"
     r = await client.post(
@@ -141,12 +178,12 @@ async def call_gemini(
 
     import sys
     if "error" in data:
-        raise ValueError(f"Gemini API error: {data['error'].get('message', data['error'])}")
+        raise ProviderResponseError(f"Gemini API error: {data['error'].get('message', data['error'])}")
 
     candidates = data.get("candidates", [])
     if not candidates:
         print(f"[Gemini] No candidates in response: {data}", file=sys.stderr)
-        raise ValueError("Gemini returned no candidates")
+        raise ProviderResponseError("Gemini returned no candidates")
 
     parts = candidates[0].get("content", {}).get("parts", [])
     text = "".join(p.get("text", "") for p in parts if p.get("text"))
@@ -191,7 +228,6 @@ async def call_groq(
     question: str,
     answer: str,
 ) -> dict:
-    api_key = api_key or GROQ_API_KEY
     prompt = build_eval_prompt(section, question, answer)
     r = await client.post(
         "https://api.groq.com/openai/v1/chat/completions",
@@ -262,24 +298,17 @@ async def evaluate_with_provider(
     """Route to the correct provider and return parsed evaluation."""
     if provider == "ollama":
         return await call_ollama(client, model, section, question, answer)
-    elif provider == "gemini":
-        if not api_key:
-            raise ValueError("Google Gemini API key is required")
-        return await call_gemini(client, api_key, model, section, question, answer)
-    elif provider == "groq":
-        if not api_key:
-            raise ValueError("Groq API key is required")
-        return await call_groq(client, api_key, model, section, question, answer)
-    elif provider == "openai":
-        if not api_key:
-            raise ValueError("OpenAI API key is required")
-        return await call_openai(client, api_key, model, section, question, answer)
-    elif provider == "anthropic":
-        if not api_key:
-            raise ValueError("Anthropic API key is required")
-        return await call_anthropic(client, api_key, model, section, question, answer)
-    else:
-        raise ValueError(f"Unknown provider: {provider}")
+
+    resolved_key = resolve_api_key(provider, api_key)
+    if provider == "gemini":
+        return await call_gemini(client, resolved_key, model, section, question, answer)
+    if provider == "groq":
+        return await call_groq(client, resolved_key, model, section, question, answer)
+    if provider == "openai":
+        return await call_openai(client, resolved_key, model, section, question, answer)
+    if provider == "anthropic":
+        return await call_anthropic(client, resolved_key, model, section, question, answer)
+    raise ClientInputError(f"Unknown provider: {provider}")
 
 
 # ─── Question generation ──────────────────────────────────
@@ -339,7 +368,12 @@ async def _call_llm_for_questions(
         )
         r.raise_for_status()
         data = r.json()
-        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        if "error" in data:
+            raise ProviderResponseError(f"Gemini API error: {data['error'].get('message', data['error'])}")
+        candidates = data.get("candidates", [])
+        if not candidates:
+            raise ProviderResponseError("Gemini returned no candidates")
+        parts = candidates[0].get("content", {}).get("parts", [])
         text = "".join(p.get("text", "") for p in parts if p.get("text"))
 
     elif provider in ("groq", "openai", "anthropic"):
@@ -370,6 +404,8 @@ async def _call_llm_for_questions(
                       "messages": [{"role": "user", "content": prompt}]})
             r.raise_for_status()
             text = r.json()["choices"][0]["message"]["content"]
+    else:
+        raise ClientInputError(f"Unknown provider: {provider}")
 
     print(f"[gen] raw (200): {repr(text[:200])}", file=sys.stderr)
 
@@ -379,9 +415,16 @@ async def _call_llm_for_questions(
     start = cleaned.find("[")
     end = cleaned.rfind("]")
     if start == -1 or end <= start:
-        raise ValueError(f"No JSON array in response: {repr(text[:150])}")
+        raise ProviderResponseError(f"No JSON array in response: {repr(text[:150])}")
 
-    questions = json.loads(cleaned[start:end + 1])
+    try:
+        questions = json.loads(cleaned[start:end + 1])
+    except json.JSONDecodeError as error:
+        raise ProviderResponseError(f"Could not parse generated questions: {error.msg}") from error
+
+    if not isinstance(questions, list):
+        raise ProviderResponseError("Provider did not return a question list")
+
     # Validate and normalise each question
     result = []
     for i, q in enumerate(questions):
@@ -417,7 +460,7 @@ def _image_to_base64(file_bytes: bytes, content_type: str) -> str:
 def _build_file_question_prompt(text_content: str) -> str:
     return f"""You are a senior JavaScript/React technical interviewer.
 
-The candidate has uploaded the following content (CV, resume, code snippet, or document):
+The candidate has uploaded the following content (CV, resume, screenshot, or document):
 
 ---
 {text_content}
@@ -446,13 +489,9 @@ async def generate_question_from_file(
     filename: str,
 ) -> dict:
     """Extract content from PDF or image, generate 1 interview question."""
-    import sys, base64
+    import sys
 
-    # Apply key fallbacks
-    if provider == "gemini":
-        api_key = api_key or GEMINI_API_KEY
-    elif provider == "groq":
-        api_key = api_key or GROQ_API_KEY
+    resolved_key = resolve_api_key(provider, api_key)
 
     is_pdf = "pdf" in content_type or filename.lower().endswith(".pdf")
     is_image = content_type.startswith("image/") or filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
@@ -460,10 +499,10 @@ async def generate_question_from_file(
     if is_pdf:
         text_content = _extract_pdf_text(file_bytes)
         if not text_content.strip():
-            raise ValueError("Could not extract text from PDF")
+            raise ClientInputError("Could not extract text from PDF")
         prompt = _build_file_question_prompt(text_content)
         # Text-only path for all providers
-        result = await _call_llm_for_questions(client, provider, api_key, model, prompt)
+        result = await _call_llm_for_questions(client, provider, resolved_key, model, prompt)
     elif is_image:
         # Vision path: use provider's vision capability
         img_b64 = _image_to_base64(file_bytes, content_type)
@@ -484,7 +523,7 @@ async def generate_question_from_file(
             model_name = model or "gemini-2.5-flash"
             r = await client.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
-                params={"key": api_key},
+                params={"key": resolved_key},
                 json={
                     "contents": [{"parts": [
                         {"text": vision_prompt},
@@ -501,7 +540,7 @@ async def generate_question_from_file(
         elif provider == "openai":
             r = await client.post(
                 "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers={"Authorization": f"Bearer {resolved_key}"},
                 json={
                     "model": model or "gpt-4o-mini",
                     "max_tokens": 512,
@@ -517,7 +556,7 @@ async def generate_question_from_file(
         elif provider == "anthropic":
             r = await client.post(
                 "https://api.anthropic.com/v1/messages",
-                headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
+                headers={"x-api-key": resolved_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
                 json={
                     "model": model or "claude-sonnet-4-20250514",
                     "max_tokens": 512,
@@ -533,7 +572,7 @@ async def generate_question_from_file(
 
         else:
             # Groq / Ollama don't support vision natively — extract via OCR hint fallback
-            raise ValueError(f"Provider '{provider}' does not support image vision. Use Gemini, OpenAI, or Anthropic for images, or upload a PDF.")
+            raise ClientInputError(f"Provider '{provider}' does not support image vision. Use Gemini, OpenAI, or Anthropic for images, or upload a PDF.")
 
         print(f"[file-vision] raw (200): {repr(text[:200])}", file=sys.stderr)
         # Parse single JSON object
@@ -542,14 +581,17 @@ async def generate_question_from_file(
         start = cleaned.find("{")
         end = cleaned.rfind("}")
         if start == -1 or end <= start:
-            raise ValueError(f"No JSON object in vision response: {repr(text[:150])}")
-        q = json.loads(cleaned[start:end + 1])
+            raise ProviderResponseError(f"No JSON object in vision response: {repr(text[:150])}")
+        try:
+            q = json.loads(cleaned[start:end + 1])
+        except json.JSONDecodeError as error:
+            raise ProviderResponseError(f"Could not parse file question: {error.msg}") from error
         result = [{"id": q.get("id", "file01"), "q": str(q["q"]).strip(), "s": str(q.get("s", "AI Generated")).strip(), "day": 0}]
     else:
-        raise ValueError("Unsupported file type. Please upload a PDF or image (PNG, JPG, WEBP).")
+        raise ClientInputError("Unsupported file type. Please upload a PDF or image (PNG, JPG, WEBP, GIF).")
 
     if not result:
-        raise ValueError("Could not generate a question from this file")
+        raise ProviderResponseError("Could not generate a question from this file")
     return result[0]
 
 
@@ -562,11 +604,6 @@ async def generate_questions_with_provider(
     count: int,
 ) -> list:
     """Generate interview questions using the selected provider."""
-    # Apply key fallbacks
-    if provider == "gemini":
-        api_key = api_key or GEMINI_API_KEY
-    elif provider in ("groq",):
-        api_key = api_key or GROQ_API_KEY
-
     prompt = build_question_gen_prompt(topic, count)
-    return await _call_llm_for_questions(client, provider, api_key, model, prompt)
+    resolved_key = resolve_api_key(provider, api_key)
+    return await _call_llm_for_questions(client, provider, resolved_key, model, prompt)

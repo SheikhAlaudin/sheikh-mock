@@ -7,7 +7,7 @@ import { transcribeAudio } from '../api';
  * When groqApiKey is provided:
  *   - Click Start → MediaRecorder begins capturing mic audio
  *   - Click Stop  → audio blob sent to /api/transcribe → Whisper returns text
- *   - Text appended to textarea via onTranscript()
+ *   - Text is appended via onTranscript()
  *
  * When no groqApiKey:
  *   - Falls back to browser Web Speech API (real-time, lower quality)
@@ -28,43 +28,44 @@ export function useVoice(onTranscript, groqApiKey = '') {
   const groqKeyRef = useRef(groqApiKey);
   const isRecRef = useRef(false);
 
-  // Keep refs current
   useEffect(() => { onTranscriptRef.current = onTranscript; }, [onTranscript]);
   useEffect(() => { groqKeyRef.current = groqApiKey; }, [groqApiKey]);
 
-  // ── MediaRecorder refs (Groq Whisper mode) ──
   const mediaRecorderRef = useRef(null);
   const chunksRef = useRef([]);
   const streamRef = useRef(null);
+  const pendingWhisperStopRef = useRef(null);
+  const appendWhisperResultRef = useRef(true);
 
-  // ── Web Speech API ref (fallback mode) ──
   const recogRef = useRef(null);
   const hasMicRef = useRef(true);
 
   const useWhisper = () => !!groqKeyRef.current;
 
-  // Build Web Speech instance once (fallback only)
   useEffect(() => {
     if (!SR || recogRef.current) return;
-    const r = new SR();
-    r.continuous = true;
-    r.interimResults = true;
-    r.lang = 'en-US';
 
-    r.onresult = (e) => {
+    const recognition = new SR();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+
+    recognition.onresult = (event) => {
       let interim = '';
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        if (e.results[i].isFinal) {
-          onTranscriptRef.current(e.results[i][0].transcript);
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) {
+          onTranscriptRef.current(event.results[i][0].transcript);
         } else {
-          interim = e.results[i][0].transcript;
+          interim = event.results[i][0].transcript;
         }
       }
+
       if (interim) setLabel('Hearing: ' + interim);
     };
 
-    r.onerror = (e) => {
-      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+    recognition.onerror = (event) => {
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
         hasMicRef.current = false;
         setHasMic(false);
         isRecRef.current = false;
@@ -72,18 +73,24 @@ export function useVoice(onTranscript, groqApiKey = '') {
         setLabel('Mic access denied. Type your answer below.');
         return;
       }
-      if (e.error === 'no-speech' || e.error === 'network' || e.error === 'aborted') return;
+
+      if (event.error === 'no-speech' || event.error === 'network' || event.error === 'aborted') return;
+
       isRecRef.current = false;
       setIsRecording(false);
       setLabel('Click Voice to speak your answer');
     };
 
-    r.onend = () => {
+    recognition.onend = () => {
       if (isRecRef.current && hasMicRef.current) {
-        try { r.start(); } catch {
+        try {
+          recognition.start();
+        } catch {
           setTimeout(() => {
             if (isRecRef.current && hasMicRef.current) {
-              try { r.start(); } catch {
+              try {
+                recognition.start();
+              } catch {
                 isRecRef.current = false;
                 setIsRecording(false);
                 setLabel('Click Voice to speak your answer');
@@ -98,26 +105,28 @@ export function useVoice(onTranscript, groqApiKey = '') {
       }
     };
 
-    recogRef.current = r;
+    recogRef.current = recognition;
   }, []);
 
-  // ── Start recording ──
   const startWhisper = useCallback(async () => {
+    if (pendingWhisperStopRef.current) return;
+
     setError('');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
       chunksRef.current = [];
 
-      // Pick best supported format
       const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg'].find(
-        t => MediaRecorder.isTypeSupported(t)
+        type => MediaRecorder.isTypeSupported(type)
       ) || '';
 
-      const mr = new MediaRecorder(stream, mimeType ? { mimeType } : {});
-      mr.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
-      mr.start(250); // collect chunks every 250ms
-      mediaRecorderRef.current = mr;
+      const mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunksRef.current.push(event.data);
+      };
+      mediaRecorder.start(250);
+      mediaRecorderRef.current = mediaRecorder;
 
       isRecRef.current = true;
       setIsRecording(true);
@@ -128,63 +137,93 @@ export function useVoice(onTranscript, groqApiKey = '') {
     }
   }, []);
 
-  const stopWhisper = useCallback(async () => {
-    const mr = mediaRecorderRef.current;
+  const stopWhisper = useCallback(async (appendTranscript = true) => {
+    appendWhisperResultRef.current = appendTranscript;
+
+    if (pendingWhisperStopRef.current) {
+      if (!appendTranscript) setLabel('Click Voice to speak your answer');
+      return pendingWhisperStopRef.current;
+    }
+
+    const mediaRecorder = mediaRecorderRef.current;
     const stream = streamRef.current;
-    if (!mr) return;
+    if (!mediaRecorder) return '';
 
     isRecRef.current = false;
     setIsRecording(false);
-    setLabel('Transcribing with Whisper...');
-    setIsTranscribing(true);
+    setError('');
 
-    await new Promise((resolve) => {
-      mr.onstop = resolve;
-      mr.stop();
-    });
-
-    // Stop mic tracks
-    stream?.getTracks().forEach(t => t.stop());
-    streamRef.current = null;
-    mediaRecorderRef.current = null;
-
-    try {
-      const blob = new Blob(chunksRef.current, { type: mr.mimeType || 'audio/webm' });
-      chunksRef.current = [];
-
-      if (blob.size < 1000) {
-        setLabel('Recording too short — try again');
-        setIsTranscribing(false);
-        return;
-      }
-
-      const text = await transcribeAudio(blob, groqKeyRef.current);
-      if (text) {
-        onTranscriptRef.current(text);
-        setLabel(`Transcribed ${text.split(' ').length} words`);
-        setTimeout(() => setLabel('Click Voice to speak your answer'), 3000);
-      } else {
-        setLabel('No speech detected — try again');
-        setTimeout(() => setLabel('Click Voice to speak your answer'), 3000);
-      }
-    } catch (e) {
-      setError('Transcription failed: ' + e.message);
+    if (appendTranscript) {
+      setLabel('Transcribing with Whisper...');
+      setIsTranscribing(true);
+    } else {
       setLabel('Click Voice to speak your answer');
-    } finally {
-      setIsTranscribing(false);
     }
+
+    const stopPromise = (async () => {
+      await new Promise((resolve) => {
+        mediaRecorder.onstop = resolve;
+        mediaRecorder.stop();
+      });
+
+      stream?.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+      mediaRecorderRef.current = null;
+
+      try {
+        const blob = new Blob(chunksRef.current, { type: mediaRecorder.mimeType || 'audio/webm' });
+        chunksRef.current = [];
+
+        if (!appendWhisperResultRef.current) return '';
+
+        if (blob.size < 1000) {
+          setLabel('Recording too short — try again');
+          setTimeout(() => setLabel('Click Voice to speak your answer'), 3000);
+          return '';
+        }
+
+        const text = await transcribeAudio(blob, groqKeyRef.current);
+        if (text) {
+          if (appendWhisperResultRef.current) {
+            onTranscriptRef.current(text);
+            setLabel(`Transcribed ${text.split(' ').length} words`);
+            setTimeout(() => setLabel('Click Voice to speak your answer'), 3000);
+          }
+          return text;
+        }
+
+        if (appendWhisperResultRef.current) {
+          setLabel('No speech detected — try again');
+          setTimeout(() => setLabel('Click Voice to speak your answer'), 3000);
+        }
+        return '';
+      } catch (eventError) {
+        if (appendWhisperResultRef.current) {
+          setError('Transcription failed: ' + eventError.message);
+          setLabel('Click Voice to speak your answer');
+        }
+        return '';
+      } finally {
+        setIsTranscribing(false);
+        pendingWhisperStopRef.current = null;
+        appendWhisperResultRef.current = true;
+      }
+    })();
+
+    pendingWhisperStopRef.current = stopPromise;
+    return stopPromise;
   }, []);
 
-  // ── Fallback Web Speech start/stop ──
   const startSpeech = useCallback(() => {
     if (!hasMicRef.current || !recogRef.current) return;
+
     isRecRef.current = true;
     try {
       recogRef.current.start();
       setIsRecording(true);
       setLabel('Listening — speak now...');
-    } catch (e) {
-      if (e.name === 'InvalidStateError') {
+    } catch (eventError) {
+      if (eventError.name === 'InvalidStateError') {
         setIsRecording(true);
         setLabel('Listening — speak now...');
       }
@@ -198,22 +237,29 @@ export function useVoice(onTranscript, groqApiKey = '') {
     setLabel('Click Voice to speak your answer');
   }, []);
 
-  // ── Public API ──
   const toggle = useCallback(() => {
     if (!hasMic) return;
+
     if (isRecording) {
-      useWhisper() ? stopWhisper() : stopSpeech();
+      useWhisper() ? void stopWhisper(true) : stopSpeech();
     } else {
       useWhisper() ? startWhisper() : startSpeech();
     }
-  }, [hasMic, isRecording, startWhisper, stopWhisper, startSpeech, stopSpeech]);
+  }, [hasMic, isRecording, startSpeech, startWhisper, stopSpeech, stopWhisper]);
 
-  const stop = useCallback(() => {
-    if (!isRecRef.current && !isRecording) return;
-    useWhisper() ? stopWhisper() : stopSpeech();
-  }, [isRecording, stopWhisper, stopSpeech]);
+  const finish = useCallback(async () => {
+    if (useWhisper()) return stopWhisper(true);
+    stopSpeech();
+    return '';
+  }, [stopSpeech, stopWhisper]);
+
+  const cancel = useCallback(async () => {
+    if (useWhisper()) return stopWhisper(false);
+    stopSpeech();
+    return '';
+  }, [stopSpeech, stopWhisper]);
 
   const mode = useWhisper() ? 'whisper' : SR ? 'browser' : 'none';
 
-  return { isRecording, isTranscribing, hasMic, label, error, mode, toggle, stop };
+  return { isRecording, isTranscribing, hasMic, label, error, mode, toggle, finish, cancel };
 }

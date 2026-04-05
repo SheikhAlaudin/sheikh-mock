@@ -86,13 +86,13 @@ export default function UploadPage({ onGenerateFromFile, onBack }) {
   return (
     <div className="upload-page slide-up">
       <div className="upload-header">
-        <button className="upload-back-btn" onClick={onBack}>
+        <button className="upload-back-btn" type="button" onClick={onBack}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="15 18 9 12 15 6"/></svg>
           Back
         </button>
         <div className="upload-title-area">
           <h2 className="upload-title">Generate from File</h2>
-          <p className="upload-sub">Upload your CV, resume, or code snippet — get one tailored interview question</p>
+          <p className="upload-sub">Upload a PDF or image of your CV, resume, or notes — get one tailored interview question</p>
         </div>
       </div>
 
@@ -104,7 +104,12 @@ export default function UploadPage({ onGenerateFromFile, onBack }) {
         onClick={() => !file && inputRef.current?.click()}
         role="button"
         tabIndex={0}
-        onKeyDown={e => e.key === 'Enter' && !file && inputRef.current?.click()}
+        onKeyDown={(e) => {
+          if ((e.key === 'Enter' || e.key === ' ') && !file) {
+            e.preventDefault();
+            inputRef.current?.click();
+          }
+        }}
       >
         <input
           ref={inputRef}
@@ -123,7 +128,7 @@ export default function UploadPage({ onGenerateFromFile, onBack }) {
               <div className="dropzone-file-name">{file.name}</div>
               <div className="dropzone-file-size">{(file.size / 1024).toFixed(1)} KB</div>
             </div>
-            <button className="dropzone-clear" onClick={clearFile} title="Remove file">
+            <button className="dropzone-clear" type="button" onClick={clearFile} title="Remove file">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
             </button>
           </div>
@@ -138,7 +143,7 @@ export default function UploadPage({ onGenerateFromFile, onBack }) {
             </div>
             <p className="dropzone-main">Drop your file here</p>
             <p className="dropzone-hint">or <span className="dropzone-browse">browse</span> to choose</p>
-            <p className="dropzone-types">PDF · PNG · JPG · WEBP · max 10 MB</p>
+            <p className="dropzone-types">PDF · PNG · JPG · WEBP · GIF · max 10 MB</p>
           </div>
         )}
       </div>
@@ -148,6 +153,7 @@ export default function UploadPage({ onGenerateFromFile, onBack }) {
       <div className="upload-actions">
         <button
           className="action-btn primary ai-gen-btn"
+          type="button"
           onClick={handleGenerate}
           disabled={!file || loading}
         >
@@ -166,7 +172,7 @@ export default function UploadPage({ onGenerateFromFile, onBack }) {
       </div>
 
       <p className="upload-note">
-        The AI reads your file and crafts one targeted question based on its content.
+        The AI reads a supported PDF or image and crafts one targeted question based on its content.
       </p>
     </div>
   );

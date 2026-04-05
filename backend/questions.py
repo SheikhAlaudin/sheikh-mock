@@ -71,9 +71,15 @@ QUESTIONS = [
     {"id": "ba07", "q": "Do a code review of a React component. Name 5 common issues you would flag in a senior pull request.", "s": "Build & Practice", "day": 3},
 ]
 
+DAY_COUNTS = {
+    1: sum(1 for q in QUESTIONS if q["day"] == 1),
+    2: sum(1 for q in QUESTIONS if q["day"] == 2),
+    3: sum(1 for q in QUESTIONS if q["day"] == 3),
+}
+
 SESSIONS = [
-    {"id": "all", "name": "Full Interview", "sub": "All 71 questions", "col": "#3B82F6", "filter": None},
-    {"id": "d1", "name": "Day 1 \u00b7 JS Foundations", "sub": "30 questions \u00b7 Core JS + Arrays + Objects", "col": "#F59E0B", "filter": 1},
-    {"id": "d2", "name": "Day 2 \u00b7 JS Advanced + React", "sub": "20 questions", "col": "#10B981", "filter": 2},
-    {"id": "d3", "name": "Day 3 \u00b7 React Advanced + Build", "sub": "21 questions", "col": "#8B5CF6", "filter": 3},
+    {"id": "all", "name": "Full Interview", "sub": f"All {len(QUESTIONS)} questions", "col": "#3B82F6", "filter": None},
+    {"id": "d1", "name": "Day 1 \u00b7 JS Foundations", "sub": f"{DAY_COUNTS[1]} questions \u00b7 Core JS + Arrays + Objects", "col": "#F59E0B", "filter": 1},
+    {"id": "d2", "name": "Day 2 \u00b7 JS Advanced + React", "sub": f"{DAY_COUNTS[2]} questions", "col": "#10B981", "filter": 2},
+    {"id": "d3", "name": "Day 3 \u00b7 React Advanced + Build", "sub": f"{DAY_COUNTS[3]} questions", "col": "#8B5CF6", "filter": 3},
 ]

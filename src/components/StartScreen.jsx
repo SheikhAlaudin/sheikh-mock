@@ -12,7 +12,7 @@ const AI_TOPICS = [
   { value: 'system design for a senior frontend engineer', label: 'Frontend System Design' },
 ];
 
-export default function StartScreen({ sessions, onStart, onGenerateAI, onUpload }) {
+export default function StartScreen({ sessions, onStart, onGenerateAI, onUpload, errorMessage, onRetryInit }) {
   const [showAIPanel, setShowAIPanel] = useState(false);
   const [topic, setTopic] = useState('');
   const [count] = useState(3);
@@ -33,10 +33,22 @@ export default function StartScreen({ sessions, onStart, onGenerateAI, onUpload 
         </p>
       </div>
 
+      {errorMessage && (
+        <div className="notice-card" role="status">
+          <p>{errorMessage}</p>
+          {onRetryInit && (
+            <button className="action-btn outline" type="button" onClick={onRetryInit}>
+              Retry Connection
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="session-grid">
         {sessions.map((s, i) => (
           <button
             key={s.id}
+            type="button"
             className="session-tile"
             style={{ '--accent': s.col, animationDelay: `${i * 0.08}s` }}
             onClick={() => onStart(s.id)}
@@ -53,6 +65,7 @@ export default function StartScreen({ sessions, onStart, onGenerateAI, onUpload 
 
         {/* AI Generated session tile */}
         <button
+          type="button"
           className={`session-tile ai-tile${showAIPanel ? ' ai-tile--open' : ''}`}
           style={{ '--accent': '#a78bfa', animationDelay: `${sessions.length * 0.08}s` }}
           onClick={() => setShowAIPanel(v => !v)}
@@ -82,7 +95,7 @@ export default function StartScreen({ sessions, onStart, onGenerateAI, onUpload 
             <p className="ai-panel-hint">
               The AI will generate <strong>3 unique questions</strong> tailored to this topic using your selected provider.
             </p>
-            <button className="action-btn primary ai-gen-btn" onClick={handleGenerate}>
+            <button className="action-btn primary ai-gen-btn" type="button" onClick={handleGenerate}>
               ✨ Generate Questions
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
             </button>
@@ -91,6 +104,7 @@ export default function StartScreen({ sessions, onStart, onGenerateAI, onUpload 
 
         {/* Upload from file tile */}
         <button
+          type="button"
           className="session-tile upload-tile"
           style={{ '--accent': '#34d399', animationDelay: `${(sessions.length + 1) * 0.08}s` }}
           onClick={onUpload}
