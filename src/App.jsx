@@ -4,7 +4,6 @@ import { useSettings } from './hooks/useSettings';
 import Particles from './components/Particles';
 import StatusBar from './components/StatusBar';
 import SettingsDrawer from './components/SettingsDrawer';
-import StartScreen from './components/StartScreen';
 import SessionScreen from './components/SessionScreen';
 import DoneScreen from './components/DoneScreen';
 import UploadPage from './components/UploadPage';
@@ -120,8 +119,6 @@ export default function App() {
     showIdeal: false,
     errorMessage: '',
   })), []);
-
-  const goUpload = useCallback(() => setS(prev => ({ ...prev, phase: 'upload', errorMessage: '' })), []);
 
   const startFileSession = useCallback(async (file) => {
     setS(prev => ({ ...prev, loading: true, errorMessage: '' }));
@@ -298,17 +295,7 @@ export default function App() {
         )}
 
         {!s.loading && s.phase === 'start' && (
-          <StartScreen
-            sessions={s.sessions}
-            onStart={startSession}
-            onGenerateAI={startAISession}
-            onUpload={goUpload}
-            errorMessage={s.errorMessage}
-            onRetryInit={loadInitialData}
-          />
-        )}
-        {!s.loading && s.phase === 'upload' && (
-          <UploadPage onGenerateFromFile={startFileSession} onBack={goStart} />
+          <UploadPage onGenerateFromFile={startFileSession} />
         )}
         {!s.loading && s.phase === 'interview' && s.interviewSession && (
           <InterviewSession

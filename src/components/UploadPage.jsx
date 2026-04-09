@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback } from 'react';
 
-const ACCEPT_TYPES = ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif'];
-const ACCEPT_EXT = ['.pdf', '.png', '.jpg', '.jpeg', '.webp', '.gif'];
+const ACCEPT_TYPES = ['application/pdf'];
+const ACCEPT_EXT = ['.pdf'];
 
 function FileIcon({ type }) {
   if (type === 'application/pdf' || type?.includes('pdf')) {
@@ -34,7 +34,7 @@ export default function UploadPage({ onGenerateFromFile, onBack }) {
   const validateFile = (f) => {
     if (!f) return 'No file selected.';
     const ok = ACCEPT_TYPES.includes(f.type) || ACCEPT_EXT.some(ext => f.name.toLowerCase().endsWith(ext));
-    if (!ok) return 'Please upload a PDF or image file (PNG, JPG, WEBP, GIF).';
+    if (!ok) return 'Please upload a PDF resume.';
     if (f.size > 10 * 1024 * 1024) return 'File too large — max 10 MB.';
     return '';
   };
@@ -86,13 +86,15 @@ export default function UploadPage({ onGenerateFromFile, onBack }) {
   return (
     <div className="upload-page slide-up">
       <div className="upload-header">
-        <button className="upload-back-btn" type="button" onClick={onBack}>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="15 18 9 12 15 6"/></svg>
-          Back
-        </button>
+        {onBack && (
+          <button className="upload-back-btn" type="button" onClick={onBack}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+            Back
+          </button>
+        )}
         <div className="upload-title-area">
-          <h2 className="upload-title">Generate from File</h2>
-          <p className="upload-sub">Upload a PDF or image of your CV, resume, or notes — get one tailored interview question</p>
+          <h2 className="upload-title">Sheikh Mock Interview</h2>
+          <p className="upload-sub">Upload your resume (PDF) and start a real, conversational mock interview with adaptive AI</p>
         </div>
       </div>
 
@@ -143,7 +145,7 @@ export default function UploadPage({ onGenerateFromFile, onBack }) {
             </div>
             <p className="dropzone-main">Drop your file here</p>
             <p className="dropzone-hint">or <span className="dropzone-browse">browse</span> to choose</p>
-            <p className="dropzone-types">PDF · PNG · JPG · WEBP · GIF · max 10 MB</p>
+            <p className="dropzone-types">PDF resume · max 10 MB</p>
           </div>
         )}
       </div>
@@ -160,11 +162,11 @@ export default function UploadPage({ onGenerateFromFile, onBack }) {
           {loading ? (
             <>
               <span className="think-dots" style={{ display: 'inline-flex', gap: 3 }}><span /><span /><span /></span>
-              Analysing file…
+              Reading your resume…
             </>
           ) : (
             <>
-              ✨ Generate Question
+              ✨ Start Interview
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
             </>
           )}
@@ -172,7 +174,7 @@ export default function UploadPage({ onGenerateFromFile, onBack }) {
       </div>
 
       <p className="upload-note">
-        The AI reads a supported PDF or image and crafts one targeted question based on its content.
+        The interviewer reads your resume and asks adaptive, conversational questions tailored to your background.
       </p>
     </div>
   );
