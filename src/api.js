@@ -15,7 +15,7 @@ export async function fetchProviders() {
   return res.json();
 }
 
-export async function evaluateAnswer(questionId, answer, provider, apiKey, model) {
+export async function evaluateAnswer(questionId, answer, provider, apiKey, model, opts = {}) {
   const res = await fetch(`${BASE}/api/evaluate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -25,6 +25,8 @@ export async function evaluateAnswer(questionId, answer, provider, apiKey, model
       provider: provider || 'ollama',
       api_key: apiKey || '',
       model: model || '',
+      question_text: opts.questionText || '',
+      section: opts.section || '',
     }),
   });
   if (!res.ok) {
@@ -65,6 +67,55 @@ export async function transcribeAudio(audioBlob, groqApiKey) {
   }
   const data = await res.json();
   return data.text || '';
+}
+
+export async function startInterview(file, provider, apiKey, model) {
+  const form = new FormData();
+  form.append('file', file);
+  form.append('provider', provider || 'gemini');
+  form.append('api_key', apiKey || '');
+  form.append('model', model || '');
+
+  const res = await fetch(`${BASE}/api/interview/start`, {
+    method: 'POST',
+    body: form,
+  });
+  if (!res.ok) {
+    let detail;
+    try { const d = await res.json(); detail = d.detail; } catch { detail = await res.text(); }
+    throw new Error(detail || `Interview start failed (${res.status})`);
+  }
+  return res.json(); // { session_id, question, section, state }
+}
+
+export async function interviewTurn(sessionId, answer, provider, apiKey, model) {
+  const res = await fetch(`${BASE}/api/interview/turn`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session_id: sessionId,
+      answer,
+      provider: provider || 'gemini',
+      api_key: apiKey || '',
+      model: model || '',
+    }),
+  });
+  if (!res.ok) {
+    let detail;
+    try { const d = await res.json(); detail = d.detail; } catch { detail = await res.text(); }
+    throw new Error(detail || `Interview turn failed (${res.status})`);
+  }
+  return res.json(); // { question, section, state }
+}
+
+export async function endInterview(sessionId) {
+  const form = new FormData();
+  form.append('session_id', sessionId);
+  try {
+    await fetch(`${BASE}/api/interview/end`, { method: 'POST', body: form });
+  } catch {
+    // Best effort — ignore failures.
+  }
 }
 
 export async function generateFromFile(file, provider, apiKey, model) {

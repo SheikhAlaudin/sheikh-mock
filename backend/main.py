@@ -11,6 +11,18 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 import os
 
+from dotenv import load_dotenv
+
+# Load .env from the project root (one level up from backend/) first,
+# then fall back to backend/.env if present. Either way, variables that are
+# already set in the real environment take precedence.
+_PROJECT_ROOT_ENV = Path(__file__).resolve().parent.parent / ".env"
+_BACKEND_ENV = Path(__file__).resolve().parent / ".env"
+if _PROJECT_ROOT_ENV.exists():
+    load_dotenv(_PROJECT_ROOT_ENV, override=False)
+if _BACKEND_ENV.exists():
+    load_dotenv(_BACKEND_ENV, override=False)
+
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,10 +33,13 @@ from providers import (
     ClientInputError,
     ProviderResponseError,
     evaluate_with_provider,
+    extract_insights_from_answer,
     generate_question_from_file,
     generate_questions_with_provider,
+    interview_next_question,
     resolve_api_key,
 )
+from providers import _extract_pdf_text  # noqa: PLC2701 — internal helper reused
 
 # ── HTTP client (shared) ──
 http_client: httpx.AsyncClient | None = None
@@ -135,6 +150,10 @@ class EvalRequest(BaseModel):
     provider: str = "ollama"
     api_key: str = ""
     model: str = ""
+    # For dynamically generated questions (AI-generated, file-generated, interview)
+    # the id won't be in the static catalogue — pass the text and section directly.
+    question_text: str = ""
+    section: str = ""
 
 
 class GenerateQuestionsRequest(BaseModel):
@@ -192,7 +211,14 @@ async def get_providers():
             needs_key=True,
             server_key_available=_has_server_key("gemini"),
             default_model="gemini-2.5-flash",
-            models=["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"],
+            models=[
+                "gemini-2.5-flash",
+                "gemini-2.0-flash",
+                "gemini-2.5-pro",
+                "gemma-3-27b-it",
+                "gemma-3-12b-it",
+                "gemma-3-4b-it",
+            ],
         ),
         ProviderInfo(
             id="groq",
@@ -233,7 +259,14 @@ async def evaluate(req: EvalRequest):
         raise HTTPException(status_code=400, detail="Answer is required")
 
     question = next((q for q in QUESTIONS if q["id"] == req.question_id), None)
-    if not question:
+    if question:
+        section_text = question["s"]
+        question_text = question["q"]
+    elif req.question_text.strip():
+        # Dynamically generated question — use the text the client sent.
+        section_text = req.section.strip() or "Interview"
+        question_text = req.question_text.strip()
+    else:
         raise HTTPException(status_code=404, detail="Question not found")
 
     try:
@@ -242,8 +275,8 @@ async def evaluate(req: EvalRequest):
             provider=req.provider,
             api_key=req.api_key,
             model=req.model,
-            section=question["s"],
-            question=question["q"],
+            section=section_text,
+            question=question_text,
             answer=req.answer,
         )
     except ClientInputError as error:
@@ -365,6 +398,207 @@ async def generate_from_file(
         raise HTTPException(status_code=502, detail=f"File question generation failed: {str(error)}")
 
     return {"questions": [question]}
+
+
+# ── Interview (multi-turn conversational) ──
+import uuid
+
+INTERVIEW_SESSIONS: dict[str, dict] = {}
+MAX_INTERVIEW_TURNS = 14
+
+
+def _initial_interview_state() -> dict:
+    return {
+        "phase": "introduction",
+        "questionCount": 0,
+        "extractedSkills": [],
+        "extractedProjects": [],
+        "questionsAsked": [],
+        "difficultyLevel": 1,
+        "lastAnswerQuality": None,
+        "completed": False,
+    }
+
+
+def _next_difficulty(current: int, quality: str | None) -> int:
+    if quality == "strong":
+        return min(current + 1, 3)
+    if quality == "weak":
+        return max(current - 1, 1)
+    return current
+
+
+class InterviewTurnRequest(BaseModel):
+    session_id: str
+    answer: str
+    provider: str = "gemini"
+    api_key: str = ""
+    model: str = ""
+
+
+@app.post("/api/interview/start")
+async def interview_start(
+    file: UploadFile = File(...),
+    provider: str = Form("gemini"),
+    api_key: str = Form(""),
+    model: str = Form(""),
+):
+    """Upload a resume PDF, create an interview session, return the opening question."""
+    file_bytes = await file.read()
+    content_type = file.content_type or ""
+    filename = file.filename or ""
+    _validate_upload(file_bytes, content_type, filename)
+
+    is_pdf = "pdf" in content_type.lower() or filename.lower().endswith(".pdf")
+    if not is_pdf:
+        raise HTTPException(status_code=400, detail="Interview mode requires a PDF resume.")
+
+    try:
+        resume_text = _extract_pdf_text(file_bytes)
+    except Exception as error:
+        raise HTTPException(status_code=400, detail=f"Could not read PDF: {error}")
+
+    if not resume_text.strip():
+        raise HTTPException(status_code=400, detail="Could not extract text from PDF.")
+
+    state = _initial_interview_state()
+
+    try:
+        opening = await interview_next_question(
+            client=http_client,
+            provider=provider,
+            api_key=api_key,
+            model=model or "gemma-3-12b-it",
+            state=state,
+            resume_text=resume_text,
+            history=[],
+        )
+    except ClientInputError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except ProviderResponseError as error:
+        raise HTTPException(status_code=422, detail=str(error))
+    except httpx.HTTPStatusError as error:
+        raise HTTPException(status_code=502, detail=f"Interview start failed: {_http_error_detail(error)}")
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"Interview start failed: {str(error)}")
+
+    state["questionsAsked"].append(opening)
+    state["questionCount"] = 1
+
+    session_id = uuid.uuid4().hex
+    INTERVIEW_SESSIONS[session_id] = {
+        "resume_text": resume_text,
+        "history": [{"role": "assistant", "content": opening}],
+        "state": state,
+        "provider": provider,
+        "model": model or "gemma-3-12b-it",
+    }
+
+    return {
+        "session_id": session_id,
+        "question": opening,
+        "section": "Introduction",
+        "state": state,
+    }
+
+
+@app.post("/api/interview/turn")
+async def interview_turn(req: InterviewTurnRequest):
+    """Submit a candidate answer; receive the next interviewer question + updated state."""
+    session = INTERVIEW_SESSIONS.get(req.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Interview session not found or expired.")
+
+    answer = (req.answer or "").strip()
+    if not answer:
+        raise HTTPException(status_code=400, detail="Answer is required.")
+
+    state = session["state"]
+    history: list[dict] = session["history"]
+    resume_text: str = session["resume_text"]
+    # Allow per-turn override but fall back to session defaults.
+    provider = req.provider or session["provider"]
+    model = req.model or session["model"]
+    api_key = req.api_key
+
+    history.append({"role": "user", "content": answer})
+
+    # Step 1: extract insights from this answer (lightweight, may fail gracefully)
+    try:
+        insights = await extract_insights_from_answer(
+            client=http_client,
+            provider=provider,
+            api_key=api_key,
+            model="gemma-3-4b-it" if provider == "gemini" else model,
+            answer=answer,
+            state=state,
+        )
+    except Exception as error:
+        print(f"[interview] extract failed (non-fatal): {error}")
+        insights = {"newSkills": [], "newProjects": [], "answerQuality": "average",
+                    "confidence": "medium", "suggestedNextPhase": None}
+
+    # Merge insights
+    state["extractedSkills"] = list(dict.fromkeys(state["extractedSkills"] + insights["newSkills"]))
+    state["extractedProjects"] = list(dict.fromkeys(state["extractedProjects"] + insights["newProjects"]))
+    state["lastAnswerQuality"] = insights["answerQuality"]
+    state["difficultyLevel"] = _next_difficulty(state["difficultyLevel"], insights["answerQuality"])
+    if insights["suggestedNextPhase"]:
+        state["phase"] = insights["suggestedNextPhase"]
+
+    # Force wrap-up if we hit the cap
+    if state["questionCount"] >= MAX_INTERVIEW_TURNS:
+        state["phase"] = "wrap_up"
+
+    # Step 2: generate next question (or closing message if wrap_up reached)
+    try:
+        next_question = await interview_next_question(
+            client=http_client,
+            provider=provider,
+            api_key=api_key,
+            model=model,
+            state=state,
+            resume_text=resume_text,
+            history=history,
+        )
+    except ClientInputError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except ProviderResponseError as error:
+        raise HTTPException(status_code=422, detail=str(error))
+    except httpx.HTTPStatusError as error:
+        raise HTTPException(status_code=502, detail=f"Interview turn failed: {_http_error_detail(error)}")
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"Interview turn failed: {str(error)}")
+
+    history.append({"role": "assistant", "content": next_question})
+    state["questionsAsked"].append(next_question)
+    state["questionCount"] += 1
+
+    # Mark complete if we just delivered the wrap-up message
+    if state["phase"] == "wrap_up" and state["questionCount"] >= MAX_INTERVIEW_TURNS:
+        state["completed"] = True
+
+    section_map = {
+        "introduction": "Introduction",
+        "project_deep_dive": "Project Deep Dive",
+        "skill_basic": "Core Skills",
+        "skill_intermediate": "Intermediate",
+        "skill_advanced": "Advanced",
+        "wrap_up": "Wrap Up",
+    }
+
+    return {
+        "question": next_question,
+        "section": section_map.get(state["phase"], "Interview"),
+        "state": state,
+    }
+
+
+@app.post("/api/interview/end")
+async def interview_end(session_id: str = Form(...)):
+    """Drop a session from the in-memory store."""
+    INTERVIEW_SESSIONS.pop(session_id, None)
+    return {"ok": True}
 
 
 if __name__ == "__main__":

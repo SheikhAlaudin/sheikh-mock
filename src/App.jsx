@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
-import { fetchQuestions, fetchProviders, evaluateAnswer, generateQuestions, generateFromFile, healthCheck } from './api';
+import { fetchQuestions, fetchProviders, evaluateAnswer, generateQuestions, startInterview, healthCheck } from './api';
 import { useSettings } from './hooks/useSettings';
 import Particles from './components/Particles';
 import StatusBar from './components/StatusBar';
@@ -8,6 +8,7 @@ import StartScreen from './components/StartScreen';
 import SessionScreen from './components/SessionScreen';
 import DoneScreen from './components/DoneScreen';
 import UploadPage from './components/UploadPage';
+import InterviewSession from './components/InterviewSession';
 
 function getStats(history) {
   const ans = history.filter(h => h.verdict !== 'skipped');
@@ -40,6 +41,7 @@ const initial = {
   loading: true,
   settingsOpen: false,
   errorMessage: '',
+  interviewSession: null, // { sessionId, question, section, state }
 };
 
 export default function App() {
@@ -124,7 +126,7 @@ export default function App() {
   const startFileSession = useCallback(async (file) => {
     setS(prev => ({ ...prev, loading: true, errorMessage: '' }));
     try {
-      const data = await generateFromFile(
+      const data = await startInterview(
         file,
         settings.provider,
         settings.apiKey,
@@ -133,16 +135,13 @@ export default function App() {
       setS(prev => ({
         ...prev,
         loading: false,
-        phase: 'question',
-        session: data.questions,
-        retrySession: data.questions.slice(),
-        idx: 0,
-        draftAnswer: '',
-        history: [],
-        attempts: 0,
-        submittedAnswer: '',
-        result: null,
-        showIdeal: false,
+        phase: 'interview',
+        interviewSession: {
+          sessionId: data.session_id,
+          question: data.question,
+          section: data.section,
+          state: data.state,
+        },
       }));
     } catch (e) {
       setS(prev => ({ ...prev, loading: false }));
@@ -310,6 +309,18 @@ export default function App() {
         )}
         {!s.loading && s.phase === 'upload' && (
           <UploadPage onGenerateFromFile={startFileSession} onBack={goStart} />
+        )}
+        {!s.loading && s.phase === 'interview' && s.interviewSession && (
+          <InterviewSession
+            sessionId={s.interviewSession.sessionId}
+            initialQuestion={s.interviewSession.question}
+            initialSection={s.interviewSession.section}
+            initialState={s.interviewSession.state}
+            settings={settings}
+            groqApiKey={settings.provider === 'groq' ? settings.apiKey : (import.meta.env.VITE_GROQ_API_KEY || '')}
+            onGoStart={() => setS(prev => ({ ...prev, phase: 'start', interviewSession: null }))}
+            onComplete={() => setS(prev => ({ ...prev, phase: 'start', interviewSession: null }))}
+          />
         )}
         {!s.loading && s.phase === 'done' && (
           <DoneScreen

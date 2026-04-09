@@ -161,16 +161,17 @@ async def call_gemini(
 ) -> dict:
     prompt = build_eval_prompt(section, question, answer)
     model_name = model or "gemini-2.5-flash"
+    is_gemma = model_name.startswith("gemma")
+    generation_config: dict = {"temperature": 0.3, "maxOutputTokens": 2048}
+    if not is_gemma:
+        # Gemma models on the Gemini API do not support responseMimeType.
+        generation_config["responseMimeType"] = "application/json"
     r = await client.post(
         f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
         params={"key": api_key},
         json={
             "contents": [{"parts": [{"text": f"{EVAL_SYSTEM}\n\n{prompt}"}]}],
-            "generationConfig": {
-                "temperature": 0.3,
-                "maxOutputTokens": 2048,
-                "responseMimeType": "application/json",
-            },
+            "generationConfig": generation_config,
         },
     )
     r.raise_for_status()
@@ -357,13 +358,16 @@ async def _call_llm_for_questions(
 
     elif provider == "gemini":
         model_name = model or "gemini-2.5-flash"
+        is_gemma = model_name.startswith("gemma")
+        gen_config: dict = {"temperature": 0.7, "maxOutputTokens": 2048}
+        if not is_gemma:
+            gen_config["responseMimeType"] = "application/json"
         r = await client.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
             params={"key": api_key},
             json={
                 "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2048,
-                                     "responseMimeType": "application/json"},
+                "generationConfig": gen_config,
             },
         )
         r.raise_for_status()
@@ -400,27 +404,41 @@ async def _call_llm_for_questions(
 
         if provider in ("groq", "openai"):
             r = await client.post(url, headers=headers,
-                json={"model": mdl, "temperature": 0.7, "max_tokens": 1024,
+                json={"model": mdl, "temperature": 0.7, "max_tokens": 2048,
                       "messages": [{"role": "user", "content": prompt}]})
             r.raise_for_status()
             text = r.json()["choices"][0]["message"]["content"]
     else:
         raise ClientInputError(f"Unknown provider: {provider}")
 
-    print(f"[gen] raw (200): {repr(text[:200])}", file=sys.stderr)
+    print(f"[gen] raw (len={len(text)}): {repr(text[:400])}", file=sys.stderr)
 
-    # Parse JSON array from text
+    # Parse JSON — accept either an array of questions or a single question object
     cleaned = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE)
     cleaned = re.sub(r"```", "", cleaned).strip()
-    start = cleaned.find("[")
-    end = cleaned.rfind("]")
-    if start == -1 or end <= start:
-        raise ProviderResponseError(f"No JSON array in response: {repr(text[:150])}")
 
-    try:
-        questions = json.loads(cleaned[start:end + 1])
-    except json.JSONDecodeError as error:
-        raise ProviderResponseError(f"Could not parse generated questions: {error.msg}") from error
+    arr_start = cleaned.find("[")
+    arr_end = cleaned.rfind("]")
+    obj_start = cleaned.find("{")
+    obj_end = cleaned.rfind("}")
+
+    questions = None
+    # Prefer array if it appears before any object (or no object at all)
+    if arr_start != -1 and arr_end > arr_start and (obj_start == -1 or arr_start < obj_start):
+        try:
+            questions = json.loads(cleaned[arr_start:arr_end + 1])
+        except json.JSONDecodeError:
+            questions = None
+
+    if questions is None and obj_start != -1 and obj_end > obj_start:
+        try:
+            single = json.loads(cleaned[obj_start:obj_end + 1])
+            questions = [single] if isinstance(single, dict) else None
+        except json.JSONDecodeError as error:
+            raise ProviderResponseError(f"Could not parse generated questions: {error.msg}") from error
+
+    if questions is None:
+        raise ProviderResponseError(f"No JSON in response: {repr(text[:150])}")
 
     if not isinstance(questions, list):
         raise ProviderResponseError("Provider did not return a question list")
@@ -473,10 +491,10 @@ Based ONLY on the content above, generate exactly ONE challenging technical inte
 - Is suitable for a senior engineer (8+ years experience)
 
 STRICT RULES:
-- Return ONLY a valid JSON object — no markdown, no backticks, no explanation outside JSON.
-- Format: {{"id": "file01", "q": "<the full question>", "s": "<short category e.g. React, System Design, JS Core>", "day": 0}}
+- Return ONLY a valid JSON array containing exactly ONE question object — no markdown, no backticks, no explanation outside JSON.
+- Format: [{{"id": "file01", "q": "<the full question>", "s": "<short category e.g. React, System Design, JS Core>", "day": 0}}]
 
-Return ONLY the JSON object."""
+Return ONLY the JSON array."""
 
 
 async def generate_question_from_file(
@@ -521,6 +539,11 @@ async def generate_question_from_file(
         text = ""
         if provider == "gemini":
             model_name = model or "gemini-2.5-flash"
+            if model_name.startswith("gemma"):
+                raise ClientInputError(
+                    "Gemma models do not support image input. "
+                    "Pick a Gemini model (e.g. gemini-2.5-flash) for image uploads, or upload a PDF instead."
+                )
             r = await client.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
                 params={"key": resolved_key},
@@ -607,3 +630,248 @@ async def generate_questions_with_provider(
     prompt = build_question_gen_prompt(topic, count)
     resolved_key = resolve_api_key(provider, api_key)
     return await _call_llm_for_questions(client, provider, resolved_key, model, prompt)
+
+
+# ─── Interview conversation (multi-turn) ──────────────────
+
+INTERVIEWER_SYSTEM_PROMPT = """You are a senior software engineer conducting a real technical interview.
+Follow this conversation flow:
+
+PHASE 1 - INTRODUCTION (1 exchange):
+- Greet the candidate, ask them to walk through their background.
+
+PHASE 2 - PROJECT DEEP DIVE (2-3 exchanges):
+- Ask about specific projects they mentioned.
+- Focus on what they built, their role, tech stack, challenges faced.
+
+PHASE 3 - SKILL-BASED QUESTIONS (5-8 exchanges):
+- Pick skills from their resume / answers (React, Node, CSS, etc.).
+- Start basic and adapt difficulty based on answer quality.
+- Always connect questions to their real experience.
+
+PHASE 4 - ADVANCED / SITUATIONAL (2-3 exchanges):
+- System design or scenario questions.
+
+PHASE 5 - WRAP UP:
+- Invite their questions, then close warmly.
+
+RULES:
+- Ask ONE question at a time. Never multiple questions together.
+- Reference something they said previously when possible.
+- Sound natural — use phrases like "Got it.", "Interesting!", "That makes sense."
+- Never repeat a question already asked.
+- Output ONLY the next interviewer message — no JSON, no markdown, no commentary, no labels.
+"""
+
+
+def build_interview_user_prompt(state: dict, resume_text: str) -> str:
+    skills = ", ".join(state.get("extractedSkills", [])) or "none yet"
+    projects = ", ".join(state.get("extractedProjects", [])) or "none yet"
+    asked = "\n".join(f"- {q}" for q in state.get("questionsAsked", [])) or "(none)"
+    return f"""CANDIDATE RESUME / DOCUMENT:
+---
+{resume_text[:4000]}
+---
+
+INTERVIEW STATE:
+- Current phase: {state.get('phase', 'introduction')}
+- Question count so far: {state.get('questionCount', 0)}
+- Difficulty level (1=basic, 2=intermediate, 3=advanced): {state.get('difficultyLevel', 1)}
+- Last answer quality: {state.get('lastAnswerQuality', 'n/a')}
+- Skills extracted: {skills}
+- Projects extracted: {projects}
+
+QUESTIONS ALREADY ASKED:
+{asked}
+
+Generate the NEXT interviewer message based on the conversation history. Stay in phase {state.get('phase', 'introduction')}, adapt to difficulty {state.get('difficultyLevel', 1)}, and reference the candidate's previous answers naturally."""
+
+
+async def _call_chat_text(
+    client: httpx.AsyncClient,
+    provider: str,
+    api_key: str,
+    model: str,
+    system: str,
+    messages: list[dict],
+    *,
+    temperature: float = 0.7,
+    max_tokens: int = 1024,
+) -> str:
+    """Generic single-turn chat completion that returns plain text.
+
+    `messages` is a list of {"role": "user"|"assistant", "content": str} entries.
+    """
+    if provider == "ollama":
+        # Stitch a single prompt for Ollama's /api/generate
+        history = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
+        full = f"{system}\n\n{history}\nASSISTANT:"
+        r = await client.post(
+            "http://localhost:11434/api/generate",
+            json={"model": model or "llama3:latest", "prompt": full, "stream": False,
+                  "options": {"temperature": temperature, "num_predict": max_tokens}},
+        )
+        r.raise_for_status()
+        return (r.json().get("response") or "").strip()
+
+    if provider == "gemini":
+        model_name = model or "gemini-2.5-flash"
+        is_gemma = model_name.startswith("gemma")
+        # Gemma rejects systemInstruction; bake it into the first user message instead.
+        contents = []
+        if is_gemma:
+            stitched = system + "\n\n" + (messages[0]["content"] if messages else "")
+            contents.append({"role": "user", "parts": [{"text": stitched}]})
+            tail = messages[1:]
+        else:
+            tail = messages
+        for m in tail:
+            role = "user" if m["role"] == "user" else "model"
+            contents.append({"role": role, "parts": [{"text": m["content"]}]})
+        body: dict = {
+            "contents": contents,
+            "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
+        }
+        if not is_gemma:
+            body["systemInstruction"] = {"parts": [{"text": system}]}
+        r = await client.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
+            params={"key": api_key},
+            json=body,
+        )
+        r.raise_for_status()
+        data = r.json()
+        if "error" in data:
+            raise ProviderResponseError(f"Gemini API error: {data['error'].get('message', data['error'])}")
+        candidates = data.get("candidates", [])
+        if not candidates:
+            raise ProviderResponseError("Gemini returned no candidates")
+        parts = candidates[0].get("content", {}).get("parts", [])
+        return "".join(p.get("text", "") for p in parts if p.get("text")).strip()
+
+    if provider in ("groq", "openai"):
+        url = ("https://api.groq.com/openai/v1/chat/completions" if provider == "groq"
+               else "https://api.openai.com/v1/chat/completions")
+        mdl = model or ("llama-3.3-70b-versatile" if provider == "groq" else "gpt-4o-mini")
+        chat_messages = [{"role": "system", "content": system}] + messages
+        r = await client.post(url, headers={"Authorization": f"Bearer {api_key}"},
+            json={"model": mdl, "temperature": temperature, "max_tokens": max_tokens,
+                  "messages": chat_messages})
+        r.raise_for_status()
+        return (r.json()["choices"][0]["message"]["content"] or "").strip()
+
+    if provider == "anthropic":
+        r = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
+            json={"model": model or "claude-sonnet-4-20250514", "max_tokens": max_tokens,
+                  "system": system, "messages": messages},
+        )
+        r.raise_for_status()
+        data = r.json()
+        return "".join(c["text"] for c in data["content"] if c["type"] == "text").strip()
+
+    raise ClientInputError(f"Unknown provider: {provider}")
+
+
+async def interview_next_question(
+    client: httpx.AsyncClient,
+    provider: str,
+    api_key: str,
+    model: str,
+    state: dict,
+    resume_text: str,
+    history: list[dict],
+) -> str:
+    """Generate the next interviewer message given the conversation history."""
+    resolved_key = resolve_api_key(provider, api_key)
+    user_prompt = build_interview_user_prompt(state, resume_text)
+    # Append the user_prompt as the latest user turn so the model has fresh state context.
+    messages = history + [{"role": "user", "content": user_prompt}]
+    text = await _call_chat_text(
+        client, provider, resolved_key, model,
+        system=INTERVIEWER_SYSTEM_PROMPT,
+        messages=messages,
+        temperature=0.7,
+        max_tokens=512,
+    )
+    # Some models prefix with "Interviewer:" — strip it.
+    text = re.sub(r"^\s*(interviewer|assistant)\s*:\s*", "", text, flags=re.IGNORECASE)
+    return text.strip()
+
+
+EXTRACT_SYSTEM = (
+    "You analyse a candidate's interview answer and extract structured insights. "
+    "Return ONLY raw JSON — no markdown, no backticks, no commentary."
+)
+
+
+def build_extract_prompt(answer: str, state: dict) -> str:
+    known = ", ".join(state.get("extractedSkills", [])) or "none"
+    return f"""Analyse this interview answer and extract structured information.
+
+Already-known skills: {known}
+Current phase: {state.get('phase', 'introduction')}
+Current difficulty (1-3): {state.get('difficultyLevel', 1)}
+
+Answer:
+\"\"\"
+{answer}
+\"\"\"
+
+Return ONLY a JSON object with this exact shape:
+{{
+  "newSkills": ["skill1", "skill2"],
+  "newProjects": ["project1"],
+  "answerQuality": "weak" | "average" | "strong",
+  "confidence": "low" | "medium" | "high",
+  "suggestedNextPhase": "introduction" | "project_deep_dive" | "skill_basic" | "skill_intermediate" | "skill_advanced" | "wrap_up"
+}}
+
+Rules:
+- newSkills must NOT include any already-known skills.
+- answerQuality is "strong" if the answer is detailed, technically accurate, and shows depth.
+- answerQuality is "weak" if the answer is short, vague, off-topic, or wrong.
+- suggestedNextPhase must progress logically from the current phase based on questionCount and quality.
+"""
+
+
+async def extract_insights_from_answer(
+    client: httpx.AsyncClient,
+    provider: str,
+    api_key: str,
+    model: str,
+    answer: str,
+    state: dict,
+) -> dict:
+    """Run a lightweight LLM call to extract skills/projects/quality from an answer."""
+    resolved_key = resolve_api_key(provider, api_key)
+    prompt = build_extract_prompt(answer, state)
+    text = await _call_chat_text(
+        client, provider, resolved_key, model,
+        system=EXTRACT_SYSTEM,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+        max_tokens=512,
+    )
+    # Tolerant JSON extraction
+    cleaned = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"```", "", cleaned).strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end <= start:
+        raise ProviderResponseError(f"No JSON in extract response: {repr(text[:150])}")
+    try:
+        data = json.loads(cleaned[start:end + 1])
+    except json.JSONDecodeError as error:
+        raise ProviderResponseError(f"Could not parse extract JSON: {error.msg}") from error
+
+    return {
+        "newSkills": [str(s) for s in (data.get("newSkills") or []) if isinstance(s, str)],
+        "newProjects": [str(p) for p in (data.get("newProjects") or []) if isinstance(p, str)],
+        "answerQuality": data.get("answerQuality") if data.get("answerQuality") in ("weak", "average", "strong") else "average",
+        "confidence": data.get("confidence") if data.get("confidence") in ("low", "medium", "high") else "medium",
+        "suggestedNextPhase": data.get("suggestedNextPhase") if data.get("suggestedNextPhase") in (
+            "introduction", "project_deep_dive", "skill_basic", "skill_intermediate", "skill_advanced", "wrap_up"
+        ) else None,
+    }
