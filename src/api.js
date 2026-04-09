@@ -27,6 +27,8 @@ export async function evaluateAnswer(questionId, answer, provider, apiKey, model
       model: model || '',
       question_text: opts.questionText || '',
       section: opts.section || '',
+      interview_session_id: opts.interviewSessionId || '',
+      profile: opts.profile || null,
     }),
   });
   if (!res.ok) {

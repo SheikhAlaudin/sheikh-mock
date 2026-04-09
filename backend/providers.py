@@ -5,11 +5,61 @@ Supports: Ollama (local), Groq, Google Gemini, OpenAI, Anthropic.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
+import sys
+from typing import Any, Awaitable, Callable
 
 import httpx
+
+# ─── Retry + provider fallback ────────────────────────────
+# Transient HTTP statuses worth retrying. 503 is the Google AI Studio
+# "high demand" overload code; 529 is Anthropic's overload; 500/502/504 are
+# generic transient gateway errors.
+RETRY_STATUSES: set[int] = {500, 502, 503, 504, 529}
+
+
+async def _retry_with_backoff(
+    fn: Callable[[], Awaitable[Any]],
+    *,
+    max_attempts: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 8.0,
+    label: str = "call",
+) -> Any:
+    """Run `fn`, retrying on transient HTTP errors with exponential backoff."""
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await fn()
+        except httpx.HTTPStatusError as error:
+            last_error = error
+            status = error.response.status_code if error.response is not None else 0
+            if status not in RETRY_STATUSES or attempt == max_attempts:
+                raise
+            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+            print(
+                f"[retry:{label}] attempt {attempt}/{max_attempts} failed with HTTP {status}; "
+                f"sleeping {delay:.1f}s",
+                file=sys.stderr,
+            )
+            await asyncio.sleep(delay)
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout) as error:
+            last_error = error
+            if attempt == max_attempts:
+                raise
+            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+            print(
+                f"[retry:{label}] attempt {attempt}/{max_attempts} network error: {error}; "
+                f"sleeping {delay:.1f}s",
+                file=sys.stderr,
+            )
+            await asyncio.sleep(delay)
+    if last_error:
+        raise last_error
+    raise RuntimeError("retry_with_backoff exhausted with no error captured")
 
 ENV_KEY_NAMES = {
     "gemini": "GEMINI_API_KEY",
@@ -134,9 +184,10 @@ async def call_ollama(
     section: str,
     question: str,
     answer: str,
+    profile: dict | None = None,
     base_url: str = "http://localhost:11434",
 ) -> dict:
-    prompt = build_eval_prompt(section, question, answer)
+    prompt = build_role_aware_eval_prompt(section, question, answer, profile)
     r = await client.post(
         f"{base_url}/api/generate",
         json={
@@ -158,8 +209,9 @@ async def call_gemini(
     section: str,
     question: str,
     answer: str,
+    profile: dict | None = None,
 ) -> dict:
-    prompt = build_eval_prompt(section, question, answer)
+    prompt = build_role_aware_eval_prompt(section, question, answer, profile)
     model_name = model or "gemini-2.5-flash"
     is_gemma = model_name.startswith("gemma")
     generation_config: dict = {"temperature": 0.3, "maxOutputTokens": 2048}
@@ -200,8 +252,9 @@ async def call_openai(
     section: str,
     question: str,
     answer: str,
+    profile: dict | None = None,
 ) -> dict:
-    prompt = build_eval_prompt(section, question, answer)
+    prompt = build_role_aware_eval_prompt(section, question, answer, profile)
     r = await client.post(
         "https://api.openai.com/v1/chat/completions",
         headers={"Authorization": f"Bearer {api_key}"},
@@ -228,8 +281,9 @@ async def call_groq(
     section: str,
     question: str,
     answer: str,
+    profile: dict | None = None,
 ) -> dict:
-    prompt = build_eval_prompt(section, question, answer)
+    prompt = build_role_aware_eval_prompt(section, question, answer, profile)
     r = await client.post(
         "https://api.groq.com/openai/v1/chat/completions",
         headers={"Authorization": f"Bearer {api_key}"},
@@ -256,8 +310,9 @@ async def call_anthropic(
     section: str,
     question: str,
     answer: str,
+    profile: dict | None = None,
 ) -> dict:
-    prompt = build_eval_prompt(section, question, answer)
+    prompt = build_role_aware_eval_prompt(section, question, answer, profile)
     r = await client.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -287,6 +342,32 @@ PROVIDERS = {
     "anthropic": call_anthropic,
 }
 
+async def _evaluate_once(
+    client: httpx.AsyncClient,
+    provider: str,
+    api_key: str,
+    model: str,
+    section: str,
+    question: str,
+    answer: str,
+    profile: dict | None,
+) -> dict:
+    """Single evaluation attempt for one provider — used by retry+fallback wrapper."""
+    if provider == "ollama":
+        return await call_ollama(client, model, section, question, answer, profile=profile)
+
+    resolved_key = resolve_api_key(provider, api_key)
+    if provider == "gemini":
+        return await call_gemini(client, resolved_key, model, section, question, answer, profile=profile)
+    if provider == "groq":
+        return await call_groq(client, resolved_key, model, section, question, answer, profile=profile)
+    if provider == "openai":
+        return await call_openai(client, resolved_key, model, section, question, answer, profile=profile)
+    if provider == "anthropic":
+        return await call_anthropic(client, resolved_key, model, section, question, answer, profile=profile)
+    raise ClientInputError(f"Unknown provider: {provider}")
+
+
 async def evaluate_with_provider(
     client: httpx.AsyncClient,
     provider: str,
@@ -295,21 +376,43 @@ async def evaluate_with_provider(
     section: str,
     question: str,
     answer: str,
+    profile: dict | None = None,
 ) -> dict:
-    """Route to the correct provider and return parsed evaluation."""
-    if provider == "ollama":
-        return await call_ollama(client, model, section, question, answer)
+    """Route to the correct provider with retry+backoff. Falls back to Groq on exhaustion."""
 
-    resolved_key = resolve_api_key(provider, api_key)
-    if provider == "gemini":
-        return await call_gemini(client, resolved_key, model, section, question, answer)
-    if provider == "groq":
-        return await call_groq(client, resolved_key, model, section, question, answer)
-    if provider == "openai":
-        return await call_openai(client, resolved_key, model, section, question, answer)
-    if provider == "anthropic":
-        return await call_anthropic(client, resolved_key, model, section, question, answer)
-    raise ClientInputError(f"Unknown provider: {provider}")
+    async def _primary() -> dict:
+        return await _evaluate_once(client, provider, api_key, model, section, question, answer, profile)
+
+    try:
+        return await _retry_with_backoff(_primary, max_attempts=3, label=f"eval:{provider}")
+    except (httpx.HTTPStatusError, httpx.RequestError) as primary_error:
+        if provider == "groq" or provider == "ollama":
+            raise
+
+        # Try Groq fallback if a key is available.
+        try:
+            resolve_api_key("groq", "")
+        except ClientInputError:
+            print(
+                f"[fallback:eval] {provider} exhausted retries and no GROQ_API_KEY is set; "
+                f"surfacing original error",
+                file=sys.stderr,
+            )
+            raise primary_error
+
+        print(
+            f"[fallback:eval] {provider} exhausted retries; falling back to Groq "
+            f"({GROQ_FALLBACK_MODEL})",
+            file=sys.stderr,
+        )
+
+        async def _fallback() -> dict:
+            return await _evaluate_once(
+                client, "groq", "", GROQ_FALLBACK_MODEL,
+                section, question, answer, profile,
+            )
+
+        return await _retry_with_backoff(_fallback, max_attempts=2, label="eval:groq")
 
 
 # ─── Question generation ──────────────────────────────────
@@ -634,57 +737,93 @@ async def generate_questions_with_provider(
 
 # ─── Interview conversation (multi-turn) ──────────────────
 
-INTERVIEWER_SYSTEM_PROMPT = """You are a senior software engineer conducting a real technical interview.
+def build_interviewer_system_prompt(profile: dict | None) -> str:
+    if profile:
+        domain = profile.get("domain") or "General"
+        role = (profile.get("roles") or ["Professional"])[0]
+        level = profile.get("experienceLevel") or "mid"
+        years = profile.get("yearsOfExperience") or 0
+        is_tech = bool(profile.get("isTechnical", True))
+        persona = (
+            f"a senior {domain} professional and hiring manager interviewing a {level} {role} "
+            f"with {years} years of experience"
+        )
+        domain_rule = (
+            ""
+            if is_tech
+            else (
+                f"\nDOMAIN RULES:\n"
+                f"- This candidate is in {domain}, NOT software engineering.\n"
+                f"- DO NOT ask about programming, code, frameworks, or technical CS topics.\n"
+                f"- Ask {domain}-specific questions appropriate to a {role}.\n"
+            )
+        )
+    else:
+        persona = "a senior interviewer conducting a real job interview"
+        domain_rule = ""
+
+    return f"""You are {persona}.
 Follow this conversation flow:
 
 PHASE 1 - INTRODUCTION (1 exchange):
-- Greet the candidate, ask them to walk through their background.
+- Greet the candidate warmly, ask them to walk through their background.
 
-PHASE 2 - PROJECT DEEP DIVE (2-3 exchanges):
-- Ask about specific projects they mentioned.
-- Focus on what they built, their role, tech stack, challenges faced.
+PHASE 2 - PROJECT / EXPERIENCE DEEP DIVE (2-3 exchanges):
+- Ask about specific projects, classes, campaigns, cases, or experiences they mentioned.
+- Focus on what they did, their role, the context, and challenges faced.
 
 PHASE 3 - SKILL-BASED QUESTIONS (5-8 exchanges):
-- Pick skills from their resume / answers (React, Node, CSS, etc.).
+- Pick concrete skills or competencies from their resume / answers.
 - Start basic and adapt difficulty based on answer quality.
-- Always connect questions to their real experience.
+- Always connect questions to their real experience and domain.
 
 PHASE 4 - ADVANCED / SITUATIONAL (2-3 exchanges):
-- System design or scenario questions.
+- Scenario, judgement, or strategic questions appropriate to their level.
 
 PHASE 5 - WRAP UP:
 - Invite their questions, then close warmly.
-
+{domain_rule}
 RULES:
 - Ask ONE question at a time. Never multiple questions together.
 - Reference something they said previously when possible.
 - Sound natural — use phrases like "Got it.", "Interesting!", "That makes sense."
 - Never repeat a question already asked.
+- Match the candidate's domain and experience level — do NOT default to software engineering topics unless they ARE a software engineer.
 - Output ONLY the next interviewer message — no JSON, no markdown, no commentary, no labels.
 """
 
 
-def build_interview_user_prompt(state: dict, resume_text: str) -> str:
+def build_interview_user_prompt(state: dict, resume_text: str, profile: dict | None = None) -> str:
     skills = ", ".join(state.get("extractedSkills", [])) or "none yet"
     projects = ", ".join(state.get("extractedProjects", [])) or "none yet"
     asked = "\n".join(f"- {q}" for q in state.get("questionsAsked", [])) or "(none)"
+    profile_block = ""
+    if profile:
+        profile_block = (
+            f"\nCANDIDATE PROFILE:\n"
+            f"- Domain: {profile.get('domain')}\n"
+            f"- Role: {(profile.get('roles') or ['Professional'])[0]}\n"
+            f"- Experience: {profile.get('experienceLevel')} ({profile.get('yearsOfExperience', 0)} yrs)\n"
+            f"- Is technical: {profile.get('isTechnical', True)}\n"
+            f"- Top skills from resume: {', '.join(profile.get('topSkills') or []) or 'none listed'}\n"
+        )
     return f"""CANDIDATE RESUME / DOCUMENT:
 ---
 {resume_text[:4000]}
 ---
-
+{profile_block}
 INTERVIEW STATE:
 - Current phase: {state.get('phase', 'introduction')}
 - Question count so far: {state.get('questionCount', 0)}
 - Difficulty level (1=basic, 2=intermediate, 3=advanced): {state.get('difficultyLevel', 1)}
 - Last answer quality: {state.get('lastAnswerQuality', 'n/a')}
-- Skills extracted: {skills}
+- Skills extracted from answers so far: {skills}
 - Projects extracted: {projects}
 
 QUESTIONS ALREADY ASKED:
 {asked}
 
-Generate the NEXT interviewer message based on the conversation history. Stay in phase {state.get('phase', 'introduction')}, adapt to difficulty {state.get('difficultyLevel', 1)}, and reference the candidate's previous answers naturally."""
+Generate the NEXT interviewer message based on the conversation history. Stay in phase {state.get('phase', 'introduction')}, adapt to difficulty {state.get('difficultyLevel', 1)}, and reference the candidate's previous answers naturally. Make sure the question is appropriate to their domain and role."""
 
 
 async def _call_chat_text(
@@ -774,6 +913,74 @@ async def _call_chat_text(
     raise ClientInputError(f"Unknown provider: {provider}")
 
 
+# ─── Chat-text fallback chain ─────────────────────────────
+# Default Groq chat model used when the primary provider exhausts retries.
+GROQ_FALLBACK_MODEL = "llama-3.3-70b-versatile"
+
+
+async def _call_chat_text_with_fallback(
+    client: httpx.AsyncClient,
+    provider: str,
+    api_key: str,
+    model: str,
+    system: str,
+    messages: list[dict],
+    *,
+    temperature: float = 0.7,
+    max_tokens: int = 1024,
+    label: str = "chat",
+) -> str:
+    """Call _call_chat_text with retry+backoff. On exhaustion, fall back to Groq.
+
+    The fallback uses GROQ_API_KEY from the environment (loaded from .env).
+    If the primary provider IS already Groq, we just retry without falling back.
+    """
+
+    async def _primary() -> str:
+        return await _call_chat_text(
+            client, provider, api_key, model, system, messages,
+            temperature=temperature, max_tokens=max_tokens,
+        )
+
+    try:
+        return await _retry_with_backoff(_primary, max_attempts=3, label=f"{label}:{provider}")
+    except (httpx.HTTPStatusError, httpx.RequestError) as primary_error:
+        if provider == "groq":
+            raise  # already on the fallback target
+
+        # Try the Groq fallback if a key is available.
+        try:
+            groq_key = resolve_api_key("groq", "")
+        except ClientInputError:
+            print(
+                f"[fallback:{label}] {provider} exhausted retries and no GROQ_API_KEY is set; "
+                f"surfacing original error",
+                file=sys.stderr,
+            )
+            raise primary_error
+
+        print(
+            f"[fallback:{label}] {provider} exhausted retries; falling back to Groq "
+            f"({GROQ_FALLBACK_MODEL})",
+            file=sys.stderr,
+        )
+
+        async def _fallback() -> str:
+            return await _call_chat_text(
+                client, "groq", groq_key, GROQ_FALLBACK_MODEL, system, messages,
+                temperature=temperature, max_tokens=max_tokens,
+            )
+
+        try:
+            return await _retry_with_backoff(_fallback, max_attempts=2, label=f"{label}:groq")
+        except Exception as fallback_error:
+            print(
+                f"[fallback:{label}] groq fallback also failed: {fallback_error}",
+                file=sys.stderr,
+            )
+            raise
+
+
 async def interview_next_question(
     client: httpx.AsyncClient,
     provider: str,
@@ -782,22 +989,274 @@ async def interview_next_question(
     state: dict,
     resume_text: str,
     history: list[dict],
+    profile: dict | None = None,
 ) -> str:
     """Generate the next interviewer message given the conversation history."""
     resolved_key = resolve_api_key(provider, api_key)
-    user_prompt = build_interview_user_prompt(state, resume_text)
+    user_prompt = build_interview_user_prompt(state, resume_text, profile=profile)
+    system_prompt = build_interviewer_system_prompt(profile)
     # Append the user_prompt as the latest user turn so the model has fresh state context.
     messages = history + [{"role": "user", "content": user_prompt}]
-    text = await _call_chat_text(
+    text = await _call_chat_text_with_fallback(
         client, provider, resolved_key, model,
-        system=INTERVIEWER_SYSTEM_PROMPT,
+        system=system_prompt,
         messages=messages,
         temperature=0.7,
         max_tokens=512,
+        label="interview",
     )
     # Some models prefix with "Interviewer:" — strip it.
     text = re.sub(r"^\s*(interviewer|assistant)\s*:\s*", "", text, flags=re.IGNORECASE)
     return text.strip()
+
+
+PROFILE_SYSTEM = (
+    "You read a candidate's resume and extract a structured professional profile. "
+    "You are domain-agnostic — the candidate may be a software engineer, teacher, nurse, "
+    "marketer, accountant, designer, lawyer, or any other professional. "
+    "Return ONLY raw JSON — no markdown, no backticks, no commentary."
+)
+
+
+def build_profile_prompt(resume_text: str) -> str:
+    return f"""Read the following resume and extract a structured profile.
+
+RESUME:
+\"\"\"
+{resume_text[:5000]}
+\"\"\"
+
+Return ONLY a JSON object with EXACTLY these fields:
+{{
+  "domain": "<the candidate's primary professional domain — e.g. Software Engineering, Education, Healthcare, Marketing, Finance, Law, Design, Sales, Human Resources, Operations, Data Science, Product Management, Research, Mechanical Engineering, etc.>",
+  "roles": ["<their current or most recent job title>", "<a second relevant title if any>"],
+  "yearsOfExperience": <integer estimate from earliest job to now, 0 if fresher>,
+  "experienceLevel": "fresher" | "junior" | "mid" | "senior" | "expert",
+  "isTechnical": <true if the role requires writing code, building software, or working hands-on with technical systems; false for teaching, healthcare, marketing, HR, sales, etc.>,
+  "topSkills": ["<skill1>", "<skill2>", "<skill3>", "<skill4>", "<skill5>"],
+  "notableProjects": ["<project1>", "<project2>"]
+}}
+
+Rules:
+- experienceLevel mapping: 0-1 yrs = fresher, 1-3 = junior, 3-7 = mid, 7-15 = senior, 15+ = expert
+- domain must reflect what they ACTUALLY do, not the field of their degree
+- isTechnical is true ONLY for roles like software engineer, devops, data engineer, embedded systems, etc.
+- A teacher of computer science is isTechnical = false (they teach, not build)
+- Use the candidate's own words for skills where possible
+- Return valid JSON only — no extra text.
+"""
+
+
+async def extract_profile_from_resume(
+    client: httpx.AsyncClient,
+    provider: str,
+    api_key: str,
+    model: str,
+    resume_text: str,
+) -> dict:
+    """Run a single LLM call to extract a domain-aware profile from the resume."""
+    resolved_key = resolve_api_key(provider, api_key)
+    text = await _call_chat_text_with_fallback(
+        client, provider, resolved_key, model,
+        system=PROFILE_SYSTEM,
+        messages=[{"role": "user", "content": build_profile_prompt(resume_text)}],
+        temperature=0.2,
+        max_tokens=768,
+        label="profile",
+    )
+    cleaned = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"```", "", cleaned).strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end <= start:
+        raise ProviderResponseError(f"No JSON in profile response: {repr(text[:150])}")
+    try:
+        data = json.loads(cleaned[start:end + 1])
+    except json.JSONDecodeError as error:
+        raise ProviderResponseError(f"Could not parse profile JSON: {error.msg}") from error
+
+    valid_levels = ("fresher", "junior", "mid", "senior", "expert")
+    level = data.get("experienceLevel")
+    if level not in valid_levels:
+        years = int(data.get("yearsOfExperience") or 0)
+        if years < 1:
+            level = "fresher"
+        elif years < 3:
+            level = "junior"
+        elif years < 7:
+            level = "mid"
+        elif years < 15:
+            level = "senior"
+        else:
+            level = "expert"
+
+    return {
+        "domain": str(data.get("domain") or "General Professional").strip(),
+        "roles": [str(r).strip() for r in (data.get("roles") or []) if isinstance(r, (str, int)) and str(r).strip()][:3] or ["Professional"],
+        "yearsOfExperience": int(data.get("yearsOfExperience") or 0),
+        "experienceLevel": level,
+        "isTechnical": bool(data.get("isTechnical", True)),
+        "topSkills": [str(s).strip() for s in (data.get("topSkills") or []) if isinstance(s, (str, int)) and str(s).strip()][:8],
+        "notableProjects": [str(p).strip() for p in (data.get("notableProjects") or []) if isinstance(p, (str, int)) and str(p).strip()][:5],
+    }
+
+
+# ─── Domain-aware evaluation criteria ────────────────────
+
+DOMAIN_CRITERIA: dict[str, str] = {
+    "education": (
+        "- Does the answer show understanding of pedagogy or teaching methods?\n"
+        "- Does it mention student outcomes, engagement, learning goals, or classroom management?\n"
+        "- Reward: Bloom's Taxonomy, differentiated instruction, formative assessment, lesson planning, "
+        "student-centered learning, parent communication."
+    ),
+    "healthcare": (
+        "- Does the answer reflect patient-centered thinking and clinical accuracy for their role?\n"
+        "- Does it mention protocols, safety, or patient outcomes?\n"
+        "- Reward: empathy, accuracy, safety-first mindset, team coordination, evidence-based practice."
+    ),
+    "marketing": (
+        "- Does the answer show strategic thinking about audience, channels, and goals?\n"
+        "- Does it reference metrics, campaigns, brand awareness, or the marketing funnel?\n"
+        "- Reward: ROI thinking, data-driven decisions, creativity, channel knowledge."
+    ),
+    "human resources": (
+        "- Does the answer reflect knowledge of HR policies, people management, and fairness?\n"
+        "- Does it show empathy, conflict resolution, and organisational awareness?\n"
+        "- Reward: policy knowledge, culture building, structured processes."
+    ),
+    "sales": (
+        "- Does the answer show understanding of pipeline, objection handling, and customer needs?\n"
+        "- Does it reference quotas, qualification frameworks (BANT, MEDDIC), or relationship building?\n"
+        "- Reward: empathy, persistence, data-driven follow-up."
+    ),
+    "finance": (
+        "- Does the answer show numerical accuracy and an understanding of financial principles?\n"
+        "- Does it reference reporting standards, controls, or risk?\n"
+        "- Reward: precision, regulatory awareness, business impact."
+    ),
+    "design": (
+        "- Does the answer show user-centred thinking and visual / interaction craft?\n"
+        "- Does it reference research, accessibility, design systems, or trade-offs?\n"
+        "- Reward: empathy for users, iteration, critique culture."
+    ),
+}
+
+
+def _domain_criteria(domain: str, is_technical: bool) -> str:
+    key = (domain or "").strip().lower()
+    if key in DOMAIN_CRITERIA:
+        return DOMAIN_CRITERIA[key]
+    if is_technical:
+        return (
+            "- Does the answer correctly address the technical concept?\n"
+            "- Is the explanation clear, accurate, and grounded in real practice?\n"
+            "- Reward: real examples, trade-off awareness, best practices, performance / scaling considerations."
+        )
+    return (
+        f"- Does the answer directly address the question asked within the {domain} field?\n"
+        f"- Does it show real domain knowledge and practical experience as a professional in {domain}?\n"
+        f"- Is the answer coherent and professionally expressed?\n"
+        f"- Reward any answer that shows genuine understanding of the candidate's field."
+    )
+
+
+LENIENCY_BY_LEVEL: dict[str, str] = {
+    "fresher": (
+        "Be very lenient — they are starting out.\n"
+        "- Incomplete answers = partial (not incorrect)\n"
+        "- An honest 'I don't know but I'd learn X' = partial credit\n"
+        "- Do not require examples from work experience\n"
+        "- Reward curiosity and willingness to learn."
+    ),
+    "junior": (
+        "Be moderately lenient — they have basic experience.\n"
+        "- Correct concept with vague example = partial\n"
+        "- Correct concept with clear example = correct\n"
+        "- Partial answers are fine if direction is correct."
+    ),
+    "mid": (
+        "Be balanced — expect practical knowledge.\n"
+        "- Must show real-world application, not just theory\n"
+        "- Vague answers without examples = partial\n"
+        "- Clear example with one trade-off = correct."
+    ),
+    "senior": (
+        "Apply a high standard — expect depth and leadership.\n"
+        "- Textbook answers without context = partial\n"
+        "- Must show decision-making and trade-off awareness\n"
+        "- No examples from experience = mark down."
+    ),
+    "expert": (
+        "Apply a very high standard — strategic and systemic thinking expected.\n"
+        "- Surface-level answers = incorrect\n"
+        "- Must show organisational or industry-level thinking."
+    ),
+}
+
+
+def build_role_aware_eval_prompt(section: str, question: str, answer: str, profile: dict | None) -> str:
+    """Build an evaluation prompt that adapts to the candidate's domain and level."""
+    if not profile:
+        # Fall back to the original technical-only prompt for catalogue questions
+        return build_eval_prompt(section, question, answer)
+
+    domain = profile.get("domain") or "General Professional"
+    role = (profile.get("roles") or ["Professional"])[0]
+    level = profile.get("experienceLevel") or "mid"
+    years = profile.get("yearsOfExperience") or 0
+    is_tech = bool(profile.get("isTechnical", True))
+    criteria = _domain_criteria(domain, is_tech)
+    leniency = LENIENCY_BY_LEVEL.get(level, LENIENCY_BY_LEVEL["mid"])
+
+    return f"""You are a fair and experienced {domain} professional evaluating a job interview answer.
+
+=== CANDIDATE CONTEXT ===
+Domain:           {domain}
+Role:             {role}
+Experience level: {level} ({years} yrs)
+Is technical:     {is_tech}
+
+=== SECTION ===
+{section}
+
+=== QUESTION ASKED ===
+{question}
+
+=== CANDIDATE'S ANSWER ===
+{answer}
+
+=== HOW TO EVALUATE ===
+{criteria}
+
+=== LENIENCY GUIDE ===
+{leniency}
+
+=== CRITICAL RULES ===
+- NEVER judge a {domain} answer using software/coding standards (unless isTechnical is true).
+- A teacher mentioning "Bloom's Taxonomy" or "differentiated instruction" = CORRECT.
+- A teacher NOT knowing JavaScript = completely NORMAL and NOT a mistake.
+- A fresher giving an incomplete but directionally correct answer = PARTIAL, not INCORRECT.
+- Only mark "incorrect" if the answer is completely irrelevant OR blank.
+- Feedback must use {domain} terminology, not tech jargon.
+- "ideal" must sound like a real {role} would say it.
+- Judge this answer as a {level} {role}, NOT as a software engineer.
+
+EVALUATION INSTRUCTIONS:
+1. SEMANTIC INTERPRETATION: First, mentally correct any obvious voice transcription errors in the answer. Evaluate the corrected meaning.
+2. CONCEPT EXTRACTION: Identify the 3-5 key things this question requires. For each, decide if the candidate demonstrated understanding (even partially).
+3. SCORING RUBRIC (apply leniency for the candidate's level above):
+   - 85-100 (correct): Covers all key points accurately for a {level} {role}, even if not perfectly worded
+   - 50-84 (partial): Demonstrates clear understanding of some points but misses others
+   - 20-49 (partial): Shows awareness of the topic but with significant gaps
+   - 0-19 (incorrect): Does not demonstrate meaningful understanding or is irrelevant/blank
+4. VERDICT RULES:
+   - "correct" if score >= 75
+   - "partial" if score >= 30
+   - "incorrect" if score < 30
+
+Respond with ONLY a raw JSON object — no markdown, no backticks, no explanation outside the JSON:
+{{"score": <integer 0-100>, "verdict": "correct"|"partial"|"incorrect", "strength": "<specific things they demonstrated correctly in {domain} terms — be generous with partial credit>", "missing": "<specific {domain}-relevant points they missed — be precise>", "hint": "<Socratic question pointing toward the gap, empty string if correct>", "ideal": "<concise ideal answer in 2-3 sentences, phrased as a real {role} would say it>"}}"""
 
 
 EXTRACT_SYSTEM = (
@@ -847,12 +1306,13 @@ async def extract_insights_from_answer(
     """Run a lightweight LLM call to extract skills/projects/quality from an answer."""
     resolved_key = resolve_api_key(provider, api_key)
     prompt = build_extract_prompt(answer, state)
-    text = await _call_chat_text(
+    text = await _call_chat_text_with_fallback(
         client, provider, resolved_key, model,
         system=EXTRACT_SYSTEM,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2,
         max_tokens=512,
+        label="extract",
     )
     # Tolerant JSON extraction
     cleaned = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE)

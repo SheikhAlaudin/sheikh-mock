@@ -138,6 +138,7 @@ export default function App() {
           question: data.question,
           section: data.section,
           state: data.state,
+          profile: data.profile,
         },
       }));
     } catch (e) {
@@ -303,6 +304,7 @@ export default function App() {
             initialQuestion={s.interviewSession.question}
             initialSection={s.interviewSession.section}
             initialState={s.interviewSession.state}
+            initialProfile={s.interviewSession.profile}
             settings={settings}
             groqApiKey={settings.provider === 'groq' ? settings.apiKey : (import.meta.env.VITE_GROQ_API_KEY || '')}
             onGoStart={() => setS(prev => ({ ...prev, phase: 'start', interviewSession: null }))}

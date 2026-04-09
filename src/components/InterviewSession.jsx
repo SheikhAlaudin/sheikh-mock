@@ -17,6 +17,7 @@ export default function InterviewSession({
   initialQuestion,
   initialSection,
   initialState,
+  initialProfile,
   settings,
   groqApiKey,
   onGoStart,
@@ -80,7 +81,12 @@ export default function InterviewSession({
         settings.provider,
         settings.apiKey,
         settings.model,
-        { questionText: currentQuestion, section: currentSection },
+        {
+          questionText: currentQuestion,
+          section: currentSection,
+          interviewSessionId: sessionId,
+          profile: initialProfile,
+        },
       );
       evalResult.score = Math.max(0, Math.min(100, Math.round(evalResult.score)));
     } catch (e) {
@@ -177,7 +183,7 @@ export default function InterviewSession({
         </div>
       </div>
 
-      <InterviewProgress state={interviewState} />
+      <InterviewProgress state={interviewState} profile={initialProfile} />
 
       {/* Conversation history (collapsed bubbles for previous turns) */}
       {history.length > 1 && (

@@ -7,11 +7,23 @@ const PHASES = [
   { id: 'wrap_up', label: 'Wrap' },
 ];
 
-export default function InterviewProgress({ state }) {
+export default function InterviewProgress({ state, profile }) {
   const activeIndex = PHASES.findIndex(p => p.id === state.phase);
 
   return (
     <div className="iv-progress">
+      {profile && (
+        <div className="iv-profile-row">
+          <div className="iv-profile-block">
+            <span className="iv-profile-role">{profile.roles?.[0] || 'Professional'}</span>
+            <span className="iv-profile-meta">
+              {profile.domain} · {profile.experienceLevel} · {profile.yearsOfExperience} yrs
+              {profile.isTechnical ? ' · technical' : ' · non-technical'}
+            </span>
+          </div>
+        </div>
+      )}
+
       <div className="iv-phase-bar">
         {PHASES.map((p, i) => {
           const isActive = i === activeIndex;

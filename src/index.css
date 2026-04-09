@@ -1253,6 +1253,33 @@ html, body {
   margin: 12px 0 18px;
 }
 
+.iv-profile-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.iv-profile-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.iv-profile-role {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.iv-profile-meta {
+  font-size: 11px;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
 .iv-phase-bar {
   display: flex;
   gap: 6px;

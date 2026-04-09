@@ -34,6 +34,7 @@ from providers import (
     ProviderResponseError,
     evaluate_with_provider,
     extract_insights_from_answer,
+    extract_profile_from_resume,
     generate_question_from_file,
     generate_questions_with_provider,
     interview_next_question,
@@ -154,6 +155,10 @@ class EvalRequest(BaseModel):
     # the id won't be in the static catalogue — pass the text and section directly.
     question_text: str = ""
     section: str = ""
+    # Optional: pass the candidate profile so evaluation is role-aware.
+    # Either inline (`profile`) or by reference (`interview_session_id`).
+    profile: dict | None = None
+    interview_session_id: str = ""
 
 
 class GenerateQuestionsRequest(BaseModel):
@@ -269,6 +274,13 @@ async def evaluate(req: EvalRequest):
     else:
         raise HTTPException(status_code=404, detail="Question not found")
 
+    # Resolve the profile: prefer the live interview session over an inline payload.
+    profile: dict | None = req.profile
+    if req.interview_session_id:
+        sess = INTERVIEW_SESSIONS.get(req.interview_session_id)
+        if sess and sess.get("profile"):
+            profile = sess["profile"]
+
     try:
         result = await evaluate_with_provider(
             client=http_client,
@@ -278,6 +290,7 @@ async def evaluate(req: EvalRequest):
             section=section_text,
             question=question_text,
             answer=req.answer,
+            profile=profile,
         )
     except ClientInputError as error:
         raise HTTPException(status_code=400, detail=str(error))
@@ -461,17 +474,47 @@ async def interview_start(
     if not resume_text.strip():
         raise HTTPException(status_code=400, detail="Could not extract text from PDF.")
 
+    chosen_model = model or "gemma-3-12b-it"
+
+    # Step 1: extract a structured profile (domain, role, experience, isTechnical, ...).
+    try:
+        profile = await extract_profile_from_resume(
+            client=http_client,
+            provider=provider,
+            api_key=api_key,
+            model=chosen_model,
+            resume_text=resume_text,
+        )
+    except ClientInputError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except Exception as error:
+        # Profile extraction is best-effort — fall back to a generic profile.
+        print(f"[interview] profile extraction failed (non-fatal): {error}")
+        profile = {
+            "domain": "General Professional",
+            "roles": ["Professional"],
+            "yearsOfExperience": 0,
+            "experienceLevel": "mid",
+            "isTechnical": True,
+            "topSkills": [],
+            "notableProjects": [],
+        }
+
     state = _initial_interview_state()
+    # Seed the live state with what we already learned from the resume.
+    state["extractedSkills"] = list(profile.get("topSkills") or [])
+    state["extractedProjects"] = list(profile.get("notableProjects") or [])
 
     try:
         opening = await interview_next_question(
             client=http_client,
             provider=provider,
             api_key=api_key,
-            model=model or "gemma-3-12b-it",
+            model=chosen_model,
             state=state,
             resume_text=resume_text,
             history=[],
+            profile=profile,
         )
     except ClientInputError as error:
         raise HTTPException(status_code=400, detail=str(error))
@@ -490,8 +533,9 @@ async def interview_start(
         "resume_text": resume_text,
         "history": [{"role": "assistant", "content": opening}],
         "state": state,
+        "profile": profile,
         "provider": provider,
-        "model": model or "gemma-3-12b-it",
+        "model": chosen_model,
     }
 
     return {
@@ -499,6 +543,7 @@ async def interview_start(
         "question": opening,
         "section": "Introduction",
         "state": state,
+        "profile": profile,
     }
 
 
@@ -516,6 +561,7 @@ async def interview_turn(req: InterviewTurnRequest):
     state = session["state"]
     history: list[dict] = session["history"]
     resume_text: str = session["resume_text"]
+    profile: dict | None = session.get("profile")
     # Allow per-turn override but fall back to session defaults.
     provider = req.provider or session["provider"]
     model = req.model or session["model"]
@@ -560,6 +606,7 @@ async def interview_turn(req: InterviewTurnRequest):
             state=state,
             resume_text=resume_text,
             history=history,
+            profile=profile,
         )
     except ClientInputError as error:
         raise HTTPException(status_code=400, detail=str(error))
