@@ -218,6 +218,9 @@ async def call_gemini(
     if not is_gemma:
         # Gemma models on the Gemini API do not support responseMimeType.
         generation_config["responseMimeType"] = "application/json"
+    if "flash" in model_name and not is_gemma:
+        # Disable thinking — it consumes the maxOutputTokens budget and truncates JSON output.
+        generation_config["thinkingConfig"] = {"thinkingBudget": 0}
     r = await client.post(
         f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
         params={"key": api_key},
@@ -465,6 +468,8 @@ async def _call_llm_for_questions(
         gen_config: dict = {"temperature": 0.7, "maxOutputTokens": 2048}
         if not is_gemma:
             gen_config["responseMimeType"] = "application/json"
+        if "flash" in model_name and not is_gemma:
+            gen_config["thinkingConfig"] = {"thinkingBudget": 0}
         r = await client.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
             params={"key": api_key},
@@ -867,9 +872,13 @@ async def _call_chat_text(
         for m in tail:
             role = "user" if m["role"] == "user" else "model"
             contents.append({"role": role, "parts": [{"text": m["content"]}]})
+        gen_config: dict = {"temperature": temperature, "maxOutputTokens": max_tokens}
+        if "flash" in model_name and not is_gemma:
+            # Disable thinking — it consumes the maxOutputTokens budget and truncates output.
+            gen_config["thinkingConfig"] = {"thinkingBudget": 0}
         body: dict = {
             "contents": contents,
-            "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
+            "generationConfig": gen_config,
         }
         if not is_gemma:
             body["systemInstruction"] = {"parts": [{"text": system}]}

@@ -474,7 +474,7 @@ async def interview_start(
     if not resume_text.strip():
         raise HTTPException(status_code=400, detail="Could not extract text from PDF.")
 
-    chosen_model = model or "gemma-3-12b-it"
+    chosen_model = model or "gemini-2.5-flash"
 
     # Step 1: extract a structured profile (domain, role, experience, isTechnical, ...).
     try:
@@ -575,7 +575,7 @@ async def interview_turn(req: InterviewTurnRequest):
             client=http_client,
             provider=provider,
             api_key=api_key,
-            model="gemma-3-4b-it" if provider == "gemini" else model,
+            model="gemini-2.5-flash-lite" if provider == "gemini" else model,
             answer=answer,
             state=state,
         )
